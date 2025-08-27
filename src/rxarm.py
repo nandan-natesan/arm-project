@@ -199,6 +199,24 @@ class RXArm(InterbotixManipulatorXS):
         """
         return self.dh_params
 
+    def check_gripper_state(self):
+        """!
+        @brief      Stops the gripper if it has reached its limits.
+        """
+        if self.gripper.gripper_moving:
+            with self.core.js_mutex:
+                gripper_pos = self.core.joint_states.position[self.gripper.left_finger_index]
+            if (
+                self.gripper.gripper_command.cmd > 0
+                and gripper_pos >= self.gripper.left_finger_upper_limit
+            ) or (
+                self.gripper.gripper_command.cmd < 0
+                and gripper_pos <= self.gripper.left_finger_lower_limit
+            ):
+                self.gripper.gripper_command.cmd = float(0.0)
+                self.core.pub_single.publish(self.gripper.gripper_command)
+                self.gripper.gripper_moving = False
+
 
 class RXArmThread(QThread):
     """!
@@ -229,11 +247,14 @@ class RXArmThread(QThread):
         self.executor.add_node(self.node)
 
     def callback(self, data):
+        with self.rxarm.core.js_mutex:
+            self.rxarm.core.joint_states = data
         self.rxarm.position_fb = np.asarray(data.position)[0:5]
         self.rxarm.velocity_fb = np.asarray(data.velocity)[0:5]
         self.rxarm.effort_fb = np.asarray(data.effort)[0:5]
         self.updateJointReadout.emit(self.rxarm.position_fb.tolist())
         self.updateEndEffectorReadout.emit(self.rxarm.get_ee_pose())
+        self.rxarm.check_gripper_state()
         #for name in self.rxarm.joint_names:
         #    print("{0} gains: {1}".format(name, self.rxarm.get_motor_pid_params(name)))
         if (__name__ == '__main__'):
