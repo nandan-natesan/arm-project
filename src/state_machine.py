@@ -26,17 +26,17 @@ class StateMachine():
         self.status_message = "State: Idle"
         self.current_state = "idle"
         self.next_state = "idle"
-        self.waypoints = [
-            [-np.pi/2,       -0.5,      -0.3,          0.0,        0.0],
-            [0.75*-np.pi/2,   0.5,       0.3,     -np.pi/3,    np.pi/2],
-            [0.5*-np.pi/2,   -0.5,      -0.3,      np.pi/2,        0.0],
-            [0.25*-np.pi/2,   0.5,       0.3,     -np.pi/3,    np.pi/2],
-            [0.0,             0.0,       0.0,          0.0,        0.0],
-            [0.25*np.pi/2,   -0.5,      -0.3,          0.0,    np.pi/2],
-            [0.5*np.pi/2,     0.5,       0.3,     -np.pi/3,        0.0],
-            [0.75*np.pi/2,   -0.5,      -0.3,          0.0,    np.pi/2],
-            [np.pi/2,         0.5,       0.3,     -np.pi/3,        0.0],
-            [0.0,             0.0,       0.0,          0.0,        0.0]]
+        self.waypoints = []
+            # [-np.pi/2,       -0.5,      -0.3,          0.0,        0.0],
+            # [0.75*-np.pi/2,   0.5,       0.3,     -np.pi/3,    np.pi/2],
+            # [0.5*-np.pi/2,   -0.5,      -0.3,      np.pi/2,        0.0],
+            # [0.25*-np.pi/2,   0.5,       0.3,     -np.pi/3,    np.pi/2],
+            # [0.0,             0.0,       0.0,          0.0,        0.0],
+            # [0.25*np.pi/2,   -0.5,      -0.3,          0.0,    np.pi/2],
+            # [0.5*np.pi/2,     0.5,       0.3,     -np.pi/3,        0.0],
+            # [0.75*np.pi/2,   -0.5,      -0.3,          0.0,    np.pi/2],
+            # [np.pi/2,         0.5,       0.3,     -np.pi/3,        0.0],
+            # [0.0,             0.0,       0.0,          0.0,        0.0]]
 
     def set_next_state(self, state):
         """!
@@ -81,6 +81,9 @@ class StateMachine():
         if self.next_state == "manual":
             self.manual()
 
+        if self.next_state == "record":
+            self.record()
+
 
     """Functions run for each state"""
 
@@ -112,7 +115,16 @@ class StateMachine():
         TODO: Implement this function to execute a waypoint plan
               Make sure you respect estop signal
         """
+
+        self.current_state = "execute"
         self.status_message = "State: Execute - Executing motion plan"
+        for waypoint in self.waypoints:
+            if self.current_state != "execute":
+                break
+            self.rxarm.set_positions(waypoint)
+            time.sleep(1)  # Wait for 1 seconds
+        self.status_message = "State: Execute - Completed motion plan"
+
         self.next_state = "idle"
 
     def calibrate(self):
@@ -143,6 +155,17 @@ class StateMachine():
             self.status_message = "State: Failed to initialize the rxarm!"
             time.sleep(5)
         self.next_state = "idle"
+
+    #record state
+    def record(self):
+        self.current_state = "record"
+        self.rxarm.disable_torque()
+
+        self.waypoints.append(self.rxarm.get_positions())
+        self.status_message = f"Recorded waypoint, waypiint var now has: {self.waypoints}"
+        sleep(10)
+        self.next_state = "idle"
+
 
 class StateMachineThread(QThread):
     """!
