@@ -23,8 +23,11 @@ from state_machine import StateMachine, StateMachineThread
 """ Radians to/from  Degrees conversions """
 D2R = np.pi / 180.0
 R2D = 180.0 / np.pi
+T_c2w = np.array([[1,0,0,-20], [0,-9.81627e-1,-1.908089e-1, 3.25e2], [0,1.98089e-1,-9.8162719e-1,9.92e2], [0,0,0,1]])
+# T_c2w = np.array([[0.999777,0.003948,-0.020768,1.481774], [0.008825, -0.970650,0.240334, 349.314655], [-0.019210,-0.240464,-0.970468,994.319565], [0,0,0,1]])
+# K = np.array([[973.791, 0, 661.585], [0,977.599, 380.320], [0,0,1]])
 
-
+K = np.array([[918.360, 0, 661.192], [0,919.154, 356.597], [0,0,1]])
 class Gui(QMainWindow):
     """!
     Main GUI Class
@@ -89,14 +92,20 @@ class Gui(QMainWindow):
         # To make a button activate a state, copy the lines for btnUser3 but change 'execute' to whichever state you want
         self.ui.btnUser1.setText('Open Gripper')
         self.ui.btnUser1.clicked.connect(lambda: self.rxarm.gripper.release())
+        self.ui.btnUser1.clicked.connect(lambda: self.sm.set_gripper_state('open'))
         self.ui.btnUser2.setText('Close Gripper')
         self.ui.btnUser2.clicked.connect(lambda: self.rxarm.gripper.grasp())
+        self.ui.btnUser2.clicked.connect(lambda: self.sm.set_gripper_state('closed'))
         self.ui.btnUser3.setText('Execute')
         self.ui.btnUser3.clicked.connect(partial(nxt_if_arm_init, 'execute'))
-        #our states
-        self.ui.btnUser3.setText('Record')
-        self.ui.btnUser3.clicked.connect(partial(nxt_if_arm_init, 'record'))
-
+        #our buttons
+        self.ui.btnUser4.setText('Record WP')
+        self.ui.btnUser4.clicked.connect(lambda: self.sm.record_waypoints())
+        self.ui.btnUser5.setText('Clear WPs')
+        self.ui.btnUser5.clicked.connect(lambda: self.sm.clear_waypoints())
+        self.ui.btnUser6.setText('Play WPs')
+        self.ui.btnUser6.clicked.connect(partial(nxt_if_arm_init, 'teach_play'))
+        
         # Sliders
         for sldr in self.joint_sliders:
             sldr.valueChanged.connect(self.sliderChange)
@@ -223,11 +232,16 @@ class Gui(QMainWindow):
         # You should make the mouseover text display the (x, y, z) coordinates of the pixel being hovered over
 
         pt = mouse_event.pos()
+        
         if self.camera.DepthFrameRaw.any() != 0:
             z = self.camera.DepthFrameRaw[pt.y()][pt.x()]
+            p3d_cam = z * np.linalg.inv(K) @ np.array([pt.x(), pt.y(), 1])
+            p3d_world = T_c2w @ np.array([p3d_cam[0], p3d_cam[1], p3d_cam[2], 1])
+            
             self.ui.rdoutMousePixels.setText("(%.0f,%.0f,%.0f)" %
                                              (pt.x(), pt.y(), z))
-            self.ui.rdoutMouseWorld.setText("(-,-,-)")
+            self.ui.rdoutMouseWorld.setText("(%.0f,%.0f,%.0f)" %
+                                             (p3d_world[0], p3d_world[1], p3d_world[2]))
 
     def calibrateMousePress(self, mouse_event):
         """!

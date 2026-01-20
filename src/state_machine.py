@@ -26,17 +26,21 @@ class StateMachine():
         self.status_message = "State: Idle"
         self.current_state = "idle"
         self.next_state = "idle"
-        self.waypoints = []
-            # [-np.pi/2,       -0.5,      -0.3,          0.0,        0.0],
-            # [0.75*-np.pi/2,   0.5,       0.3,     -np.pi/3,    np.pi/2],
-            # [0.5*-np.pi/2,   -0.5,      -0.3,      np.pi/2,        0.0],
-            # [0.25*-np.pi/2,   0.5,       0.3,     -np.pi/3,    np.pi/2],
-            # [0.0,             0.0,       0.0,          0.0,        0.0],
-            # [0.25*np.pi/2,   -0.5,      -0.3,          0.0,    np.pi/2],
-            # [0.5*np.pi/2,     0.5,       0.3,     -np.pi/3,        0.0],
-            # [0.75*np.pi/2,   -0.5,      -0.3,          0.0,    np.pi/2],
-            # [np.pi/2,         0.5,       0.3,     -np.pi/3,        0.0],
-            # [0.0,             0.0,       0.0,          0.0,        0.0]]
+        self.waypoints = [
+            [-np.pi/2,       -0.5,      -0.3,          0.0,        0.0],
+            [0.75*-np.pi/2,   0.5,       0.3,     -np.pi/3,    np.pi/2],
+            [0.5*-np.pi/2,   -0.5,      -0.3,      np.pi/2,        0.0],
+            [0.25*-np.pi/2,   0.5,       0.3,     -np.pi/3,    np.pi/2],
+            [0.0,             0.0,       0.0,          0.0,        0.0],
+            [0.25*np.pi/2,   -0.5,      -0.3,          0.0,    np.pi/2],
+            [0.5*np.pi/2,     0.5,       0.3,     -np.pi/3,        0.0],
+            [0.75*np.pi/2,   -0.5,      -0.3,          0.0,    np.pi/2],
+            [np.pi/2,         0.5,       0.3,     -np.pi/3,        0.0],
+            [0.0,             0.0,       0.0,          0.0,        0.0]]
+        #changes   
+        self.taught_waypoints = []  # List to store taught waypoints
+        self.current_gripper_state = 'open'
+        
 
     def set_next_state(self, state):
         """!
@@ -81,8 +85,8 @@ class StateMachine():
         if self.next_state == "manual":
             self.manual()
 
-        if self.next_state == "record":
-            self.record()
+        if self.next_state == "teach_play":
+            self.teach_play()
 
 
     """Functions run for each state"""
@@ -156,15 +160,72 @@ class StateMachine():
             time.sleep(5)
         self.next_state = "idle"
 
-    #record state
-    def record(self):
-        self.current_state = "record"
-        self.rxarm.disable_torque()
+    def set_gripper_state(self, state):
+        #Set logical gripper state recorded by GUI ('open' or 'closed').
+        if state not in ('open', 'closed'):
+            raise ValueError("gripper state must be 'open' or 'closed'")
+        self.current_gripper_state = state
+        self.status_message = f"Gripper marked: {state}"
+    
+    # def _is_gripper_closed(self):
+    #     try:
+    #         with self.rxarm.core.js_mutex:
+    #             left_gpos = self.rxarm.core.joint_states.position[self.rxarm.gripper.left_finger_index]
+    #             right_gpos = self.rxarm.core.joint_states.position[self.rxarm.gripper.right_finger_index]
+    #         left_mid = (self.rxarm.gripper.left_finger_upper_limit * 9.5 + self.rxarm.gripper.left_finger_lower_limit) / 10.5
+    #         right_mid = (self.rxarm.gripper.right_finger_upper_limit * 9.5 + self.rxarm.gripper.right_finger_lower_limit) / 10.5
+    #         print(f"left_gpos={left_gpos}, left_mid={left_mid}, right_gpos={right_gpos}, right_mid={right_mid}")
+    #         return left_gpos < left_mid and right_gpos < right_mid
+    #     except Exception:
+    #         return False
 
-        self.waypoints.append(self.rxarm.get_positions())
-        self.status_message = f"Recorded waypoint, waypiint var now has: {self.waypoints}"
-        sleep(10)
-        self.next_state = "idle"
+    def record_waypoints(self):
+        # read current joint positions (safe fallbacks)
+        joints = None
+        try:
+            joints = self.rxarm.get_positions()
+        except Exception:
+            joints = None
+        if joints is None:
+            joints = getattr(self.rxarm, 'position_fb', None) or getattr(self.rxarm, 'position', None)
+        if joints is None:
+            self.status_message = "Record failed: no joint feedback"
+            return
+        joints = list(np.array(joints)[0:self.rxarm.num_joints])
+        gripper_state = getattr(self, 'current_gripper_state', 'open')
+        self.taught_waypoints.append({'joints': joints, 'gripper': gripper_state})
+        print(f"Recorded waypoint: joints={joints}, gripper={gripper_state}")
+        self.status_message = f"Recorded WP #{len(self.taught_waypoints)}"
+
+    def clear_waypoints(self):
+        self.taught_waypoints = []
+        self.status_message = "Cleared taught waypoints"
+
+    def teach_play(self):
+        """!
+        @brief      Play back taught waypoints
+        """
+        num_cycles = 10
+        for _ in range(num_cycles):
+            self.current_state = "teach_play"
+            self.status_message = "State: Teach & Play - Executing taught waypoints"
+            for idx, wp in enumerate(self.taught_waypoints):
+                if self.current_state != "teach_play":
+                    break
+                self.rxarm.set_positions(wp['joints'])
+                time.sleep(1)  # Wait for 1 second
+                # Control gripper
+                if wp['gripper'] == 'closed':
+                    self.rxarm.gripper.grasp()
+                else:
+                    self.rxarm.gripper.release()
+                time.sleep(1)  # Wait for 1 second
+                self.status_message = f"State: Teach & Play - Completed WP #{idx+1}"
+            self.status_message = "State: Teach & Play - Completed all taught waypoints"
+
+        self.next_state = "idle"    
+
+
 
 
 class StateMachineThread(QThread):
