@@ -87,6 +87,9 @@ class StateMachine():
 
         if self.next_state == "teach_play":
             self.teach_play()
+        
+        if self.next_state == "calibrate":
+            self.calibrate()
 
 
     """Functions run for each state"""
@@ -224,6 +227,43 @@ class StateMachine():
             self.status_message = "State: Teach & Play - Completed all taught waypoints"
 
         self.next_state = "idle"    
+
+    def calibrate(self):
+        """!
+        @jbrief      Gets the user input to perform the calibration
+        """
+        self.current_state = "calibrate"
+        self.next_state = "idle"        """TODO Perform camera calibration routine here"""
+        world_points = np.array([[-250,-25,0],
+                                 [250,-25,0],
+                                 [250,275,0],
+                                 [-250,275,0]
+                                 ])
+        image_points = np.zeros((4,2))
+        for detection in self.camera.tag_detections.detections:            
+            center_x = int(detection.centre.x)
+            center_y = int(detection.centre.y)
+            tag_id = detection.id            
+            image_points[tag_id-1,:] = np.array([center_x, center_y])        
+        
+        k = self.camera.intrinsic_matrix
+        d = self.camera.distortion        
+        [_, R_exp, t] = cv2.solvePnP(world_points,
+                                    image_points,
+                                    k,
+                                    d)
+        R, _ = cv2.Rodrigues(R_exp)        
+        extrinsic = np.zeros((4,4))
+        extrinsic[:3,:3] = R
+        extrinsic[:-1,3] = t.flatten()
+        extrinsic[-1,-1] = 1        
+        
+        print(f"Extrinsic matrix:{extrinsic}")
+        self.camera.extrinsic_matrix = extrinsic
+
+        self.status_message = "Calibration - Completed Calibration"
+
+
 
 
 

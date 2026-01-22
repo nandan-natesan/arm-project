@@ -201,19 +201,42 @@ class Camera():
      
     def drawTagsInRGBImage(self, msg):
         """
-        @brief      Draw tags from the tag detection
-
-                    TODO: Use the tag detections output, to draw the corners/center/tagID of
+        @brief      Draw tags from the tag detection                    TODO: Use the tag detections output, to draw the corners/center/tagID of
                     the apriltags on the copy of the RGB image. And output the video to self.TagImageFrame.
-                    Message type can be found here: /opt/ros/humble/share/apriltag_msgs/msg
-
-                    center of the tag: (detection.centre.x, detection.centre.y) they are floats
+                    Message type can be found here: /opt/ros/humble/share/apriltag_msgs/msg                    center of the tag: (detection.centre.x, detection.centre.y) they are floats
                     id of the tag: detection.id
         """
         modified_image = self.VideoFrame.copy()
         # Write your code here
-
+        for detection in msg.detections:                
+            corners = detection.corners
+            center_x = int(detection.centre.x)
+            center_y = int(detection.centre.y)
+            tag_id = detection.id                # Convert corner coordinates to a NumPy array of integers for drawing
+            corner_points = np.array([
+                [int(corners[0].x), int(corners[0].y)],
+                [int(corners[1].x), int(corners[1].y)],
+                [int(corners[2].x), int(corners[2].y)],
+                [int(corners[3].x), int(corners[3].y)]
+            ], dtype=np.int32)                # Draw the tag's outline using a polygon
+            cv2.polylines(modified_image, [corner_points], isClosed=True, color=(0, 0, 255), thickness=2)                
+            # Draw a circle at the center of the tag
+            cv2.circle(modified_image, (center_x, center_y), 3, (0, 255, 0), -1)                
+            text = f"ID: {tag_id}"
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = 0.6
+            font_thickness = 1
+            text_color = (255, 0, 0)                
+            text_size, _ = cv2.getTextSize(text, font, font_scale, font_thickness)
+            text_x = center_x - 20
+            text_y = center_y - 20             
+            
+            cv2.putText(modified_image, text, (text_x, text_y), font, font_scale, text_color, font_thickness, cv2.LINE_AA)        
+    
         self.TagImageFrame = modified_image
+
+
+
 
 class ImageListener(Node):
     def __init__(self, topic, camera):

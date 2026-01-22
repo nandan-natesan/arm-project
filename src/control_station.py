@@ -105,6 +105,8 @@ class Gui(QMainWindow):
         self.ui.btnUser5.clicked.connect(lambda: self.sm.clear_waypoints())
         self.ui.btnUser6.setText('Play WPs')
         self.ui.btnUser6.clicked.connect(partial(nxt_if_arm_init, 'teach_play'))
+        self.ui.btnUser7.setText('Calibrate')
+        self.ui.btnUser4.clicked.connect(lambda: self.sm.calibrate())
         
         # Sliders
         for sldr in self.joint_sliders:
