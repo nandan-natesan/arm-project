@@ -23,11 +23,30 @@ from state_machine import StateMachine, StateMachineThread
 """ Radians to/from  Degrees conversions """
 D2R = np.pi / 180.0
 R2D = 180.0 / np.pi
-T_c2w = np.array([[1,0,0,-20], [0,-9.81627e-1,-1.908089e-1, 3.25e2], [0,1.98089e-1,-9.8162719e-1,9.92e2], [0,0,0,1]])
-# T_c2w = np.array([[0.999777,0.003948,-0.020768,1.481774], [0.008825, -0.970650,0.240334, 349.314655], [-0.019210,-0.240464,-0.970468,994.319565], [0,0,0,1]])
-# K = np.array([[973.791, 0, 661.585], [0,977.599, 380.320], [0,0,1]])
+#T_c2w = np.array([[1,0,0,-20], [0,-9.81627e-1,-1.908089e-1, 3.25e2], [0,1.98089e-1,-9.8162719e-1,9.92e2], [0,0,0,1]])
+T_c2w = np.array([[0.999777,0.003948,-0.020768,1.481774], [0.008825, -0.970650,0.240334, 349.314655], [-0.019210,-0.240464,-0.970468,994.319565], [0,0,0,1]])
+#  = np.array([[973.791, 0, 661.585], [0,977.599, 380.320], [0,0,1]])
+D = np.array(
+            [
+            0.15564486384391785,
+            0.48568257689476013,
+            0.0019681642297655344,
+            0.0007267732871696353,
+            0.44230175018310547
+            ]
+        )
+# K = np.array([[918.360, 0.0 , 661.192], [0.0 ,919.154, 356.597], [0.0 ,0.0 , 1.0]])
 
-K = np.array([[918.360, 0, 661.192], [0,919.154, 356.597], [0,0,1]])
+# - 918.3599853515625
+# - 0.0
+# - 661.1923217773438
+# - 0.0
+# - 919.1538696289062
+# - 356.59722900390625
+# - 0.0
+# - 0.0
+# - 1.0
+
 class Gui(QMainWindow):
     """!
     Main GUI Class
@@ -106,7 +125,7 @@ class Gui(QMainWindow):
         self.ui.btnUser6.setText('Play WPs')
         self.ui.btnUser6.clicked.connect(partial(nxt_if_arm_init, 'teach_play'))
         self.ui.btnUser7.setText('Calibrate')
-        self.ui.btnUser4.clicked.connect(lambda: self.sm.calibrate())
+        self.ui.btnUser7.clicked.connect(partial(nxt_if_arm_init, 'calibrate'))
         
         # Sliders
         for sldr in self.joint_sliders:
@@ -237,13 +256,17 @@ class Gui(QMainWindow):
         
         if self.camera.DepthFrameRaw.any() != 0:
             z = self.camera.DepthFrameRaw[pt.y()][pt.x()]
-            p3d_cam = z * np.linalg.inv(K) @ np.array([pt.x(), pt.y(), 1])
-            p3d_world = T_c2w @ np.array([p3d_cam[0], p3d_cam[1], p3d_cam[2], 1])
-            
+            p3d_cam = z * np.linalg.inv(self.camera.intrinsic_matrix) @ np.array([pt.x(), pt.y(), 1])
+            # p3d_world = np.linalg.inv(T_c2w) @ np.array([p3d_cam[0], p3d_cam[1], p3d_cam[2], 1])
+            h_inv =np.linalg.inv(self.camera.extrinsic_matrix)
+
+            p3d_world =  np.dot(h_inv, np.array([p3d_cam[0], p3d_cam[1], p3d_cam[2], 1]))
+
+            # z = self.camera.DepthFrameRaw[pt.y()][pt.x()]
             self.ui.rdoutMousePixels.setText("(%.0f,%.0f,%.0f)" %
                                              (pt.x(), pt.y(), z))
-            self.ui.rdoutMouseWorld.setText("(%.0f,%.0f,%.0f)" %
-                                             (p3d_world[0], p3d_world[1], p3d_world[2]))
+            # world_pos = self.camera.pixel_to_world(pt.x(),pt.y())
+            self.ui.rdoutMouseWorld.setText(f"({p3d_world[0]:.2f}, {p3d_world[1]:.2f}, {p3d_world[2]:.2f})")
 
     def calibrateMousePress(self, mouse_event):
         """!

@@ -9,6 +9,30 @@ import numpy as np
 # expm is a matrix exponential function
 from scipy.linalg import expm
 
+# Helper function
+
+def vec_to_se3(S):
+    """
+    Helper: Converts a 6-element screw vector to a 4x4 se(3) matrix.
+    S = [w_x, w_y, w_z, v_x, v_y, v_z]
+    """
+    # Extract angular (w) and linear (v) components
+    w = S[0:3]
+    v = S[3:6]
+    
+    # Form the skew-symmetric matrix for angular velocity (w_hat)
+    w_hat = np.array([
+        [0,     -w[2],  w[1]],
+        [w[2],   0,    -w[0]],
+        [-w[1],  w[0],  0   ]
+    ])
+    
+    # Construct the 4x4 se(3) matrix
+    se3_mat = np.zeros((4, 4))
+    se3_mat[0:3, 0:3] = w_hat
+    se3_mat[0:3, 3]   = v
+    return se3_mat
+
 
 def clamp(angle):
     """!
@@ -24,86 +48,206 @@ def clamp(angle):
         angle += 2 * np.pi
     return angle
 
+def get_transform_from_dh(a, alpha, d, theta):
+    """!
+    @brief      Gets the transformation matrix T from dh parameters.
+
+    @param      a      (float) link length (meters)
+    @param      alpha  (float) link twist (radians)
+    @param      d      (float) link offset (meters)
+    @param      theta  (float) joint angle (radians)
+
+    @return     (4x4 np.array) The transformation matrix.
+    """
+    
+    # Pre-compute sin/cos for efficiency and readability
+    ct = np.cos(theta)
+    st = np.sin(theta)
+    ca = np.cos(alpha)
+    sa = np.sin(alpha)
+
+    # Construct the standard DH Transformation Matrix
+    T = np.array([
+        [ct,    -st * ca,   st * sa,    a * ct],
+        [st,     ct * ca,  -ct * sa,    a * st],
+        [0,      sa,        ca,         d     ],
+        [0,      0,         0,          1     ]
+    ])
+
+    return T
+
 
 def FK_dh(dh_params, joint_angles, link):
     """!
     @brief      Get the 4x4 transformation matrix from link to world
 
-                TODO: implement this function
+    @param      dh_params     The dh parameters as a 2D list/array [a, alpha, d, theta_offset]
+    @param      joint_angles  The joint angles of the links [q1, q2, ...]
+    @param      link          (int) The index of the target link (1 to N). 
+                              If link=N, returns End Effector pose relative to World.
 
-                Calculate forward kinematics for rexarm using DH convention
-
-                return a transformation matrix representing the pose of the desired link
-
-                note: phi is the euler angle about the y-axis in the base frame
-
-    @param      dh_params     The dh parameters as a 2D list each row represents a link and has the format [a, alpha, d,
-                              theta]
-    @param      joint_angles  The joint angles of the links
-    @param      link          The link to transform from
-
-    @return     a transformation matrix representing the pose of the desired link
+    @return     (4x4 np.array) Transformation matrix representing the pose of the desired link
     """
-    pass
+    
+    # 1. Prepare the parameters
+    # Use copy=True to avoid modifying the original dh_params list passed by the user
+    params = np.array(dh_params, copy=True)
+    
+    # Add current joint angles to the theta column (index 3)
+    # This combines the static offset (from DH table) with the dynamic angle (from motors)
+    # params[i, 3] = theta_offset + joint_angle
+    num_joints = len(joint_angles)
+    params[:num_joints, 3] += joint_angles
+    
+    # 2. Initialize the global transformation as Identity
+    T_base = np.array([
+    [ 0,  1,  0,  0],
+    [-1,  0,  0,  0],
+    [ 0,  0,  1,  0],
+    [ 0,  0,  0,  1]
+])
 
-
-def get_transform_from_dh(a, alpha, d, theta):
-    """!
-    @brief      Gets the transformation matrix T from dh parameters.
-
-    TODO: Find the T matrix from a row of a DH table
-
-    @param      a      a meters
-    @param      alpha  alpha radians
-    @param      d      d meters
-    @param      theta  theta radians
-
-    @return     The 4x4 transformation matrix.
-    """
-    pass
+    T_global = T_base  # Initialize with the base offset
+    
+    # 3. Chain the transformations
+    # Loop from 0 up to 'link'. 
+    # If link=1, we do range(1) -> i=0 -> computes T_01
+    # If link=3, we do range(3) -> i=0,1,2 -> computes T_01 * T_12 * T_23
+    for i in range(link):
+        row = params[i]
+        
+        # Extract DH parameters for this row
+        a     = row[0]
+        alpha = row[1]
+        d     = row[2]
+        theta = row[3]
+        
+        # Calculate transform for this specific link (T_{i-1, i})
+        T_link = get_transform_from_dh(a, alpha, d, theta)
+        
+        # Multiply to the global transform (order matters: T_current * T_new)
+        T_global = np.dot(T_global, T_link)
+        
+    return T_global
 
 
 def get_euler_angles_from_T(T):
     """!
     @brief      Gets the euler angles from a transformation matrix.
 
-                TODO: Implement this function return the 3 Euler angles from a 4x4 transformation matrix T
-                If you like, add an argument to specify the Euler angles used (xyx, zyz, etc.)
+    @param      T     (4x4) transformation matrix
+    @param      convention  (str) 'zyx' (default, RPY) or 'zyz'
 
-    @param      T     transformation matrix
-
-    @return     The euler angles from T.
+    @return     (3,) numpy array of euler angles [angle_1, angle_2, angle_3]
+                For 'zyx', returns [yaw, pitch, roll] (alpha, beta, gamma)
     """
-    pass
+    
+    # Extract the 3x3 Rotation Matrix portion from T
+    R = T[0:3, 0:3]
+    
+    # Initialize angles
+    alpha, beta, gamma = 0.0, 0.0, 0.0
+    
+    # Tolerance for gimbal lock detection
+    tol = 1e-6
+
+    # Z-Y-Z Classic Euler angles
+    # Corresponds to R = Rz(alpha) * Ry(beta) * Rz(gamma)
+        
+    if R[2, 2] > 1.0 - tol:
+        # beta = 0
+        beta = 0
+        alpha = 0
+        gamma = np.arctan2(R[1, 0], R[0, 0])
+    elif R[2, 2] < -1.0 + tol:
+        # beta = 180
+        beta = np.pi
+        alpha = 0
+        gamma = np.arctan2(R[1, 0], R[0, 0])
+    else:
+        beta = np.arctan2(np.sqrt(R[2, 0]**2 + R[2, 1]**2), R[2, 2])
+        alpha = np.arctan2(R[1, 2], R[0, 2])
+        gamma = np.arctan2(R[2, 1], -R[2, 0])
+        
+    return np.array([alpha, beta, gamma])
+
 
 
 def get_pose_from_T(T):
     """!
     @brief      Gets the pose from T.
 
-                TODO: implement this function return the 6DOF pose vector from a 4x4 transformation matrix T
+    @param      T     (4x4) transformation matrix
 
-    @param      T     transformation matrix
-
-    @return     The pose vector from T.
+    @return     (list) [x, y, z, roll, pitch, yaw]
     """
-    return [0, 0, 0, 0, 0, 0]
+    
+    # 1. Extract the Position (Translation)
+    # The last column, first 3 rows contains the position vector p
+    x = T[0, 3]
+    y = T[1, 3]
+    z = T[2, 3]
+    
+    # 2. Extract the Euler Angles (Orientation)
+    # Uses the helper function from the previous step (defaulting to 'zyx' / RPY)
+    # Note: verify if your helper returns [yaw, pitch, roll] or [roll, pitch, yaw].
+    # The function I provided previously returned [yaw, pitch, roll].
+    yaw, pitch, roll = get_euler_angles_from_T(T)
+    
+    return [x, y, z, roll, pitch, yaw]
 
 
 def FK_pox(joint_angles, m_mat, s_lst):
     """!
-    @brief      Get a  representing the pose of the desired link
+    @brief      Get a representing the pose of the desired link
 
-                TODO: implement this function, Calculate forward kinematics for rexarm using product of exponential
-                formulation return a 4x4 homogeneous matrix representing the pose of the desired link
+    @param      joint_angles  (list or np.array) The joint angles [theta1, theta2, ...]
+    @param      m_mat         (4x4 np.array) The M matrix (Home configuration)
+    @param      s_lst         (6xN np.array) List of screw vectors (columns)
 
-    @param      joint_angles  The joint angles
-                m_mat         The M matrix
-                s_lst         List of screw vectors
-
-    @return     a 4x4 homogeneous matrix representing the pose of the desired link
+    @return     (4x4 np.array) Homogeneous matrix representing the pose of the desired link
     """
-    pass
+    
+    # 1. Initialize the transformation matrix as Identity
+    # This will accumulate the joint transformations: T = e^(S1*t1) * e^(S2*t2) ...
+    T = np.eye(4)
+    m_mat = np.array(m_mat)
+    s_lst = np.array(s_lst)
+    # 2. Iterate through each joint
+    # We assume s_lst has shape (6, N) where N is number of joints
+    num_joints = len(joint_angles)
+    
+    for i in range(num_joints):
+        theta = joint_angles[i]
+        
+        # Get the screw vector for the current joint (i-th column)
+        S = s_lst[:, i]
+        
+        # Convert screw vector to 4x4 se(3) matrix representation [S]
+        S_se3 = vec_to_se3(S)
+        
+        # Calculate matrix exponential: e^([S] * theta)
+        # This creates the transformation matrix for this specific joint's motion
+        joint_trans = expm(S_se3 * theta)
+        
+        # Accumulate the result (Order matters: Base -> Tip)
+        T = T @ joint_trans
+        
+    # 3. Multiply by the Home Configuration (M) at the very end
+    # Formula: T_final = (Product of Exponentials) * M
+    T_robot = np.dot(T, m_mat)
+    T_base = np.array([
+            [ 0,  1,  0,  0],
+            [-1,  0,  0,  0],
+            [ 0,  0,  1,  0],
+            [ 0,  0,  0,  1]
+        ])
+        
+    # Pre-multiply by the base frame transformation
+    T_final = np.dot(T_base, T_robot)
+    # T_final = T @ m_mat
+    
+    return T_final
 
 
 def to_s_matrix(w, v):

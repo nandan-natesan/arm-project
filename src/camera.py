@@ -39,6 +39,15 @@ class Camera():
 
         # mouse clicks & calibration variables
         self.camera_calibrated = False
+        self.distortion = np.array(
+            [
+            0.15564486384391785,
+            0.48568257689476013,
+            0.0019681642297655344,
+            0.0007267732871696353,
+            0.44230175018310547
+            ]
+        )
         self.intrinsic_matrix = np.eye(3)
         self.extrinsic_matrix = np.eye(4)
         self.last_click = np.array([0, 0]) # This contains the last clicked position
@@ -53,6 +62,9 @@ class Camera():
         """ block info """
         self.block_contours = np.array([])
         self.block_detections = np.array([])
+
+        self.H = np.eye(3)
+        self.hasHcalculate = False
 
     def processVideoFrame(self):
         """!
@@ -155,7 +167,7 @@ class Camera():
         """
         pts1 = coord1[0:3].astype(np.float32)
         pts2 = coord2[0:3].astype(np.float32)
-        print(cv2.getAffineTransform(pts1, pts2))
+        # print(cv2.getAffineTransform(pts1, pts2))
         return cv2.getAffineTransform(pts1, pts2)
 
     def loadCameraCalibration(self, file):
@@ -233,7 +245,111 @@ class Camera():
             
             cv2.putText(modified_image, text, (text_x, text_y), font, font_scale, text_color, font_thickness, cv2.LINE_AA)        
     
+        
+        # modified_image = self.wrap(modified_image)
         self.TagImageFrame = modified_image
+
+    # def _calculateH(self):
+    #     print("----- Calculating H called -----")
+    #     if self.tag_detections is None:
+    #         return
+    #     src = np.zeros((4,2))
+    #     for detection in self.tag_detections.detections:
+    #         center_x = int(detection.centre.x)
+    #         center_y = int(detection.centre.y)
+    #         src[detection.id - 1, :] = [center_x, center_y]
+        
+    #     x_dim = 1280
+    #     y_dim = 720
+    #     # scale = 1000
+    #     scale =0.4
+    #     x_off = 0.35*x_dim
+    #     y_off = 0.3*y_dim
+    #     dst = np.array([x_off                , y_off+0.6*scale*x_dim, 
+    #                     x_off + scale * x_dim, y_off+0.6*scale*x_dim,
+    #                     x_off +scale * x_dim , y_off,
+    #                     x_off                , y_off]).reshape((4,2))
+
+ 
+    #     self.H = cv2.findHomography(src, dst)[0]
+    #     # print(f"H:\n{self.H}")
+    #     self.hasHcalculate = True
+
+        
+    # def wrap(self,image):
+    #     # if not self.hasHcalculate:
+    #     #     self._calculateH()
+    #     new_img = cv2.warpPerspective(image, self.H, (image.shape[1], image.shape[0]))
+    #     cv2.imwrite("test.jpg",new_img)
+    #     return new_img
+
+    def pixel_to_camera(self, u: float, v: float, d_mm: float):
+        """
+        Back-project pixel (u,v) with depth d_mm (mm) into camera coordinates (mm)
+        using explicit K^{-1}.
+        """
+        if d_mm is None or d_mm <= 0:
+            return None
+
+        K = self.intrinsic_matrix.astype(float)  # 3x3
+        K_inv = np.linalg.inv(K)
+
+        uv1 = np.array([float(u), float(v), 1.0], dtype=float)  # homogeneous pixel
+        ray = K_inv @ uv1  # normalized ray: [x/z, y/z, 1]
+
+        z = float(d_mm)  # mm
+        Xc = ray * z     # [x, y, z] in mm
+        return Xc
+
+
+    def camera_to_world(self, p_cam_mm: np.ndarray):
+        """Map camera-frame point (mm) to world-frame (mm) using T_wc."""
+        p_h = np.ones((4, 1), dtype=float)
+        p_h[:3, 0] = p_cam_mm.reshape(3)
+        p_w = (np.linalg.inv(self.extrinsic_matrix) @ p_h)[:3, 0]
+        return p_w
+
+    def pixel_to_world(self, u: int, v: int):
+        """!
+        @brief      Map a pixel (u,v) to world coordinates using depth + calibration.
+
+        Depth image from the ROS driver is a uint16 in millimeters.
+        Returns (3,) in mm.
+        """
+        if self.DepthFrameRaw is None or self.DepthFrameRaw.size == 0:
+            return None
+        if v < 0 or v >= self.DepthFrameRaw.shape[0] or u < 0 or u >= self.DepthFrameRaw.shape[1]:
+            return None
+        d = float(self.DepthFrameRaw[v, u])
+        p_cam = self.pixel_to_camera(u, v, d)
+        if p_cam is None:
+            return None
+        return self.camera_to_world(p_cam)
+
+    # def world_to_pixel(self, p_world_mm: np.ndarray):
+    #     """!
+    #     @brief      Project a world point (mm) into pixel coordinates (u,v).
+
+    #     Uses T_cw = inv(T_wc) and pinhole intrinsics.
+    #     """
+    #     try:
+    #         T_cw = np.linalg.inv(self.extrinsic_matrix)
+    #     except np.linalg.LinAlgError:
+    #         return None
+
+    #     p_h = np.ones((4, 1), dtype=float)
+    #     p_h[:3, 0] = p_world_mm.reshape(3)
+    #     p_c = (T_cw @ p_h)[:3, 0]
+    #     Xc, Yc, Zc = float(p_c[0]), float(p_c[1]), float(p_c[2])
+    #     if Zc <= 1e-6:
+    #         return None
+
+    #     K = self.intrinsic_matrix
+    #     fx, fy = float(K[0, 0]), float(K[1, 1])
+    #     cx, cy = float(K[0, 2]), float(K[1, 2])
+    #     u = int(round((Xc / Zc) * fx + cx))
+    #     v = int(round((Yc / Zc) * fy + cy))
+    #     return (u, v)
 
 
 
@@ -281,6 +397,9 @@ class CameraInfoListener(Node):
 
     def callback(self, data):
         self.camera.intrinsic_matrix = np.reshape(data.k, (3, 3))
+
+
+        self.camera.distortion = np.reshape(data.d, (5,1))
         # print(self.camera.intrinsic_matrix)
 
 

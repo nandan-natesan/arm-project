@@ -5,6 +5,8 @@ from PyQt5.QtCore import QThread, Qt, pyqtSignal, pyqtSlot, QTimer
 import time
 import numpy as np
 import rclpy
+import cv2
+from cv_bridge import CvBridge
 
 class StateMachine():
     """!
@@ -88,9 +90,6 @@ class StateMachine():
         if self.next_state == "teach_play":
             self.teach_play()
         
-        if self.next_state == "calibrate":
-            self.calibrate()
-
 
     """Functions run for each state"""
 
@@ -134,17 +133,7 @@ class StateMachine():
 
         self.next_state = "idle"
 
-    def calibrate(self):
-        """!
-        @brief      Gets the user input to perform the calibration
-        """
-        self.current_state = "calibrate"
-        self.next_state = "idle"
 
-        """TODO Perform camera calibration routine here"""
-        self.status_message = "Calibration - Completed Calibration"
-
-    """ TODO """
     def detect(self):
         """!
         @brief      Detect the blocks
@@ -170,17 +159,6 @@ class StateMachine():
         self.current_gripper_state = state
         self.status_message = f"Gripper marked: {state}"
     
-    # def _is_gripper_closed(self):
-    #     try:
-    #         with self.rxarm.core.js_mutex:
-    #             left_gpos = self.rxarm.core.joint_states.position[self.rxarm.gripper.left_finger_index]
-    #             right_gpos = self.rxarm.core.joint_states.position[self.rxarm.gripper.right_finger_index]
-    #         left_mid = (self.rxarm.gripper.left_finger_upper_limit * 9.5 + self.rxarm.gripper.left_finger_lower_limit) / 10.5
-    #         right_mid = (self.rxarm.gripper.right_finger_upper_limit * 9.5 + self.rxarm.gripper.right_finger_lower_limit) / 10.5
-    #         print(f"left_gpos={left_gpos}, left_mid={left_mid}, right_gpos={right_gpos}, right_mid={right_mid}")
-    #         return left_gpos < left_mid and right_gpos < right_mid
-    #     except Exception:
-    #         return False
 
     def record_waypoints(self):
         # read current joint positions (safe fallbacks)
@@ -228,43 +206,219 @@ class StateMachine():
 
         self.next_state = "idle"    
 
+    # def calibrate(self):
+    #     self.current_state = "calibrate"
+    #     self.status_message = "Calibration - Running"
+
+    #     # map known tag ids -> world coordinates (same units as you will use downstream)
+    #     world_map = {
+    #         1: [-250.0, -25.0, 0.0],
+    #         2: [250.0, -25.0, 0.0],
+    #         3: [250.0, 275.0, 0.0],
+    #         4: [-250.0, 275.0, 0.0],
+    #     }
+
+    #     detections_msg = getattr(self.camera, "tag_detections", None)
+    #     if not detections_msg or not getattr(detections_msg, "detections", None):
+    #         self.status_message = "Calibration failed: no tag detections"
+    #         return
+
+    #     obj_pts = []
+    #     img_pts = []
+
+    #     for det in detections_msg.detections:
+    #         tag_id = getattr(det, "id", None) or getattr(det, "tag_id", None)
+    #         if tag_id is None:
+    #             continue
+
+    #         centre = getattr(det, "centre", None) or getattr(det, "center", None)
+    #         if centre is None:
+    #             continue
+
+    #         cx = getattr(centre, "x", None) or getattr(centre, "u", None)
+    #         cy = getattr(centre, "y", None) or getattr(centre, "v", None)
+    #         if cx is None or cy is None:
+    #             continue
+
+    #         if int(tag_id) in world_map:
+    #             obj_pts.append(world_map[int(tag_id)])
+    #             img_pts.append([float(cx), float(cy)])
+
+    #     if len(obj_pts) < 4:
+    #         self.status_message = f"Calibration failed: need >=4 correspondences, got {len(obj_pts)}"
+    #         return
+
+    #     k = getattr(self.camera, "intrinsic_matrix", None)
+    #     d = getattr(self.camera, "distortion", None)
+    #     if k is None:
+    #         self.status_message = "Calibration failed: missing camera intrinsics"
+    #         return
+
+    #     obj_pts_np = np.asarray(obj_pts, dtype=np.float64)
+    #     img_pts_np = np.asarray(img_pts, dtype=np.float64)
+    #     cam_mtx = np.asarray(k, dtype=np.float64)
+    #     dist_coef = None if d is None else np.asarray(d, dtype=np.float64)
+
+    #     # Debug print of inputs (comment out later)
+    #     print("Calibration inputs: obj_pts shape", obj_pts_np.shape, "img_pts shape", img_pts_np.shape)
+    #     print("Camera matrix:\n", cam_mtx)
+    #     if dist_coef is not None:
+    #         print("Distortion coeffs:", dist_coef)
+
+    #     try:
+    #         ret, rvec, tvec = cv2.solvePnP(obj_pts_np, img_pts_np, cam_mtx, dist_coef)
+    #     except Exception as e:
+    #         self.status_message = f"Calibration error: {e}"
+    #         return
+
+    #     if not ret:
+    #         self.status_message = "Calibration failed: solvePnP returned False"
+    #         return
+
+    #     R, _ = cv2.Rodrigues(rvec)
+    #     extrinsic = np.eye(4, dtype=np.float64)
+    #     extrinsic[:3, :3] = R
+    #     extrinsic[:3, 3] = tvec.flatten()
+
+    #     self.camera.extrinsic_matrix = extrinsic
+    #     print("Extrinsic matrix:\n", extrinsic)
+
+    #     self.status_message = "Calibration - Completed Calibration"
+    #     self.next_state = "idle"
+    #     time.sleep(1)
+
+    # def calibrate(self):
+    #     """!
+    #     @brief      Gets the user input to perform the calibration
+    #     """
+    #     self.current_state = "calibrate"
+              
+    #     """TODO Perform camera calibration routine here"""
+    #     world_points = np.array([[-250,-25,0],
+    #                              [250,-25,0],
+    #                              [250,275,0],
+    #                              [-250,275,0]
+    #                              ])
+    #     image_points = np.zeros((4,2))
+    #     for detection in self.camera.tag_detections.detections:            
+    #         center_x = int(detection.centre.x)
+    #         center_y = int(detection.centre.y)
+    #         tag_id = detection.id            
+    #         image_points[tag_id-1,:] = np.array([center_x, center_y])        
+        
+    #     k = self.camera.intrinsic_matrix
+    #     d = self.camera.distortion        
+    #     [_, R_exp, t] = cv2.solvePnP(world_points,
+    #                                 image_points,
+    #                                 k,
+    #                                 d,
+    #                                 flags=cv2.SOLVEPNP_ITERATIVE)
+    #     R, _ = cv2.Rodrigues(R_exp)  
+    #     print(f"Rotation Matrix:\n{R}\nTranslation Vector:\n{t}")      
+    #     extrinsic = np.zeros((4,4))
+    #     # print(f"EXTRINSIC INITIAL:\n{extrinsic}")
+    #     extrinsic[:3,:3] = R
+    #     extrinsic[:-1,3] = t.flatten()
+    #     extrinsic[-1,-1] = 1        
+        
+        
+    #     self.camera.extrinsic_matrix = extrinsic
+    #     # print(f"Extrinsic matrix:{self.camera.extrinsic_matrix}")
+        
+    #     self.status_message = "Calibration - Completed Calibration"
+    #     self.next_state = "idle"  
+    #     time.sleep(5)
+    
     def calibrate(self):
-        """!
-        @jbrief      Gets the user input to perform the calibration
+        """
+        Perform camera extrinsic calibration using AprilTag detections
         """
         self.current_state = "calibrate"
-        self.next_state = "idle"        """TODO Perform camera calibration routine here"""
-        world_points = np.array([[-250,-25,0],
-                                 [250,-25,0],
-                                 [250,275,0],
-                                 [-250,275,0]
-                                 ])
-        image_points = np.zeros((4,2))
-        for detection in self.camera.tag_detections.detections:            
-            center_x = int(detection.centre.x)
-            center_y = int(detection.centre.y)
-            tag_id = detection.id            
-            image_points[tag_id-1,:] = np.array([center_x, center_y])        
-        
-        k = self.camera.intrinsic_matrix
-        d = self.camera.distortion        
-        [_, R_exp, t] = cv2.solvePnP(world_points,
-                                    image_points,
-                                    k,
-                                    d)
-        R, _ = cv2.Rodrigues(R_exp)        
-        extrinsic = np.zeros((4,4))
-        extrinsic[:3,:3] = R
-        extrinsic[:-1,3] = t.flatten()
-        extrinsic[-1,-1] = 1        
-        
-        print(f"Extrinsic matrix:{extrinsic}")
+
+        world_points = np.array([
+            [-250, -25, 0],   # Tag 1
+            [ 250, -25, 0],   # Tag 2
+            [ 250, 275, 0],   # Tag 3
+            [-250, 275, 0],   # Tag 4
+            [300, 125, 156],#Tag 5
+            [-350, 325, 86]
+        ], dtype=np.float32)
+
+        obj_pts = []
+        img_pts = []
+
+        for detection in self.camera.tag_detections.detections:
+            tag_id = detection.id
+
+            # Only use expected tag IDs
+            if tag_id < 1 or tag_id > 6:
+                continue
+
+            # 2D image point (pixels)
+            img_pts.append([
+                detection.centre.x,
+                detection.centre.y
+            ])
+
+            # Corresponding 3D world point
+            obj_pts.append(world_points[tag_id - 1])
+
+        # Convert to NumPy arrays
+        obj_pts = np.array(obj_pts, dtype=np.float32)
+        img_pts = np.array(img_pts, dtype=np.float32)
+
+        # Sanity checks
+        if len(obj_pts) < 6:
+            print("Calibration failed: not all 6 tags detected")
+            print(f"Detected {len(obj_pts)} tags")
+            self.status_message = "Calibration failed: missing tags"
+            self.next_state = "idle"
+            return
+
+        print("World points:\n", obj_pts)
+        print("Image points:\n", img_pts)
+        print("camera intrinsics:\n", self.camera.intrinsic_matrix)
+        print("distortion coeffs:\n", self.camera.distortion)
+
+        success,  rvec, tvec , _= cv2.solvePnPRansac(
+            obj_pts,
+            img_pts,
+            self.camera.intrinsic_matrix,
+            self.camera.distortion,
+            iterationsCount = 2000, 
+            reprojectionError = 2.0,
+            
+        )
+
+        # [success, rvec, tvec] = cv2.solvePnP(obj_pts,
+        #                             img_pts,
+        #                             self.camera.intrinsic_matrix,
+        #                             self.camera.distortion,
+        #                             flags=cv2.SOLVEPNP_ITERATIVE)
+
+
+        if not success:
+            print("solvePnP failed")
+            self.status_message = "Calibration failed"
+            self.next_state = "idle"
+            return
+
+        R, _ = cv2.Rodrigues(rvec)
+
+        print("Rotation Matrix:\n", R)
+        print("Translation Vector:\n", tvec)
+
+        extrinsic = np.eye(4, dtype=np.float32)
+        extrinsic[:3, :3] = R
+        extrinsic[:3, 3] = tvec.flatten()
         self.camera.extrinsic_matrix = extrinsic
+        # self.camera._calculateH()
 
-        self.status_message = "Calibration - Completed Calibration"
+        print("Extrinsic Matrix:\n", extrinsic)
 
-
-
+        self.status_message = "Calibration - Completed"
+        self.next_state = "idle"
+        time.sleep(5)
 
 
 
