@@ -256,12 +256,12 @@ class Gui(QMainWindow):
         
         if self.camera.DepthFrameRaw.any() != 0:
             z = self.camera.DepthFrameRaw[pt.y()][pt.x()]
-            p3d_cam = z * np.linalg.inv(self.camera.intrinsic_matrix) @ np.array([pt.x(), pt.y(), 1])
-            # p3d_world = np.linalg.inv(T_c2w) @ np.array([p3d_cam[0], p3d_cam[1], p3d_cam[2], 1])
-            h_inv =np.linalg.inv(self.camera.extrinsic_matrix)
+            # p3d_cam = z * np.linalg.inv(self.camera.intrinsic_matrix) @ np.array([pt.x(), pt.y(), 1])
+            # # p3d_world = np.linalg.inv(T_c2w) @ np.array([p3d_cam[0], p3d_cam[1], p3d_cam[2], 1])
+            # h_inv =np.linalg.inv(self.camera.extrinsic_matrix)
 
-            p3d_world =  np.dot(h_inv, np.array([p3d_cam[0], p3d_cam[1], p3d_cam[2], 1]))
-
+            # p3d_world =  np.dot(h_inv, np.array([p3d_cam[0], p3d_cam[1], p3d_cam[2], 1]))
+            p3d_world = self.camera.pixel_to_world(pt.x(), pt.y())
             # z = self.camera.DepthFrameRaw[pt.y()][pt.x()]
             self.ui.rdoutMousePixels.setText("(%.0f,%.0f,%.0f)" %
                                              (pt.x(), pt.y(), z))

@@ -10,7 +10,52 @@ import numpy as np
 from scipy.linalg import expm
 
 # Helper function
+import numpy as np
 
+def matrix_exp_6(se3_mat):
+    """
+    Computes the Matrix Exponential of an se(3) matrix using Rodrigues' formula.
+    Replace scipy.linalg.expm with this.
+    """
+    # Extract the skew-symmetric angular velocity matrix
+    omg_mat = se3_mat[0:3, 0:3]
+    
+    # Extract the linear velocity vector
+    v = se3_mat[0:3, 3]
+    
+    # Check if the joint is effectively prismatic (no rotation)
+    # We check if the angular velocity is close to zero
+    if np.isclose(np.linalg.norm(omg_mat), 0):
+        # For prismatic joints: T = [I, v*theta]
+        return np.eye(4) + se3_mat
+    else:
+        # Extract rotation magnitude (theta) from the skew matrix
+        # omega_mat = [[0, -w3, w2], [w3, 0, -w1], [-w2, w1, 0]]
+        # The norm of the vector w is roughly the magnitude of elements in omg_mat
+        # A robust way to get theta from omg_mat * theta:
+        theta = np.sqrt(0.5 * np.trace(omg_mat @ omg_mat.T))
+        
+        # Normalize the skew matrix
+        omg_mat_norm = omg_mat / theta
+        
+        # Rodrigues' formula for Rotation (SO3)
+        # R = I + sin(theta)[w] + (1-cos(theta))[w]^2
+        R = (np.eye(3) + 
+             np.sin(theta) * omg_mat_norm + 
+             (1 - np.cos(theta)) * (omg_mat_norm @ omg_mat_norm))
+        
+        # Formula for Translation
+        # p = (I*theta + (1-cos(theta))[w] + (theta-sin(theta))[w]^2) * v / theta
+        G = (np.eye(3) * theta + 
+             (1 - np.cos(theta)) * omg_mat_norm + 
+             (theta - np.sin(theta)) * (omg_mat_norm @ omg_mat_norm))
+        p = np.dot(G, v) / theta
+        
+        # Construct final 4x4 matrix
+        T_res = np.eye(4)
+        T_res[0:3, 0:3] = R
+        T_res[0:3, 3] = p
+        return T_res
 def vec_to_se3(S):
     """
     Helper: Converts a 6-element screw vector to a 4x4 se(3) matrix.
@@ -18,6 +63,7 @@ def vec_to_se3(S):
     """
     # Extract angular (w) and linear (v) components
     w = S[0:3]
+
     v = S[3:6]
     
     # Form the skew-symmetric matrix for angular velocity (w_hat)
@@ -30,7 +76,8 @@ def vec_to_se3(S):
     # Construct the 4x4 se(3) matrix
     se3_mat = np.zeros((4, 4))
     se3_mat[0:3, 0:3] = w_hat
-    se3_mat[0:3, 3]   = v
+    se3_mat[0:3, 3] = v
+
     return se3_mat
 
 
@@ -91,18 +138,32 @@ def FK_dh(dh_params, joint_angles, link):
     
     # 1. Prepare the parameters
     # Use copy=True to avoid modifying the original dh_params list passed by the user
-    params = np.array(dh_params, copy=True)
+    params = np.array([[0,1.570796327,103.91,0],
+                         [200,0,0,1.570796327],
+                         [200,0,0,-1.570796327],
+                         [0,1.570796327,0,1.570796327],
+                         [0,0,65,0],
+                         [0,0,66,0]])
+    # params = np.array(dh_params, copy=True)
     
     # Add current joint angles to the theta column (index 3)
     # This combines the static offset (from DH table) with the dynamic angle (from motors)
     # params[i, 3] = theta_offset + joint_angle
     num_joints = len(joint_angles)
-    params[:num_joints, 3] += joint_angles
+    print(num_joints)
+
     
+
+    params[0:3, 3] -= joint_angles[0:3]
+
+    params[3,3] += joint_angles[3]
+
+    params[5,3] += joint_angles[4]
+
     # 2. Initialize the global transformation as Identity
     T_base = np.array([
-    [ 0,  1,  0,  0],
-    [-1,  0,  0,  0],
+    [ 0,  -1,  0,  0],
+    [1,  0,  0,  0],
     [ 0,  0,  1,  0],
     [ 0,  0,  0,  1]
 ])
@@ -113,7 +174,7 @@ def FK_dh(dh_params, joint_angles, link):
     # Loop from 0 up to 'link'. 
     # If link=1, we do range(1) -> i=0 -> computes T_01
     # If link=3, we do range(3) -> i=0,1,2 -> computes T_01 * T_12 * T_23
-    for i in range(link):
+    for i in range(link + 1):
         row = params[i]
         
         # Extract DH parameters for this row
@@ -211,6 +272,18 @@ def FK_pox(joint_angles, m_mat, s_lst):
     # 1. Initialize the transformation matrix as Identity
     # This will accumulate the joint transformations: T = e^(S1*t1) * e^(S2*t2) ...
     T = np.eye(4)
+#     m_mat = np.array([[1.0,0.0,0.0,408.575]
+# [0.0,1.0,0.0,0.0],
+#     [0.0,0.0,1.0,304.57],
+# [0.0,0.0,0.0,1.0]
+# ])    
+#     s_lst = np.array([[0.0,0.0,0.0,0.0,1.0],
+#     [0.0,1.0,1.0,1.0,0.0],
+#     [0.0,-104.57,-304.57,-304.57,0.0],
+#     [0.0,0.0,0.0,0.0,304.57],
+#     [0.0,0.0,50,250,0.0],
+#     ])
+# screw vectors
     m_mat = np.array(m_mat)
     s_lst = np.array(s_lst)
     # 2. Iterate through each joint
@@ -219,30 +292,34 @@ def FK_pox(joint_angles, m_mat, s_lst):
     
     for i in range(num_joints):
         theta = joint_angles[i]
-        
+
         # Get the screw vector for the current joint (i-th column)
         S = s_lst[:, i]
-        
+
         # Convert screw vector to 4x4 se(3) matrix representation [S]
         S_se3 = vec_to_se3(S)
-        
+
         # Calculate matrix exponential: e^([S] * theta)
         # This creates the transformation matrix for this specific joint's motion
-        joint_trans = expm(S_se3 * theta)
-        
+        # joint_trans = scipy.linalg.expm(S_se3 * theta)
+        joint_trans = matrix_exp_6(S_se3 * theta)
+
         # Accumulate the result (Order matters: Base -> Tip)
         T = T @ joint_trans
         
+
     # 3. Multiply by the Home Configuration (M) at the very end
     # Formula: T_final = (Product of Exponentials) * M
     T_robot = np.dot(T, m_mat)
     T_base = np.array([
-            [ 0,  1,  0,  0],
-            [-1,  0,  0,  0],
+            [ 0,  -1,  0,  0],
+            [1,  0,  0,  0],
             [ 0,  0,  1,  0],
             [ 0,  0,  0,  1]
         ])
         
+   
+
     # Pre-multiply by the base frame transformation
     T_final = np.dot(T_base, T_robot)
     # T_final = T @ m_mat

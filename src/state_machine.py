@@ -339,9 +339,9 @@ class StateMachine():
             [-250, -25, 0],   # Tag 1
             [ 250, -25, 0],   # Tag 2
             [ 250, 275, 0],   # Tag 3
-            [-250, 275, 0],   # Tag 4
-            [300, 125, 156],#Tag 5
-            [-350, 325, 86]
+            [-250, 275, 0]   # Tag 4
+            # [300, 125, 156],#Tag 5
+            # [-350, 325, 86]
         ], dtype=np.float32)
 
         obj_pts = []
@@ -351,7 +351,7 @@ class StateMachine():
             tag_id = detection.id
 
             # Only use expected tag IDs
-            if tag_id < 1 or tag_id > 6:
+            if tag_id < 1 or tag_id > 4:
                 continue
 
             # 2D image point (pixels)
@@ -368,8 +368,8 @@ class StateMachine():
         img_pts = np.array(img_pts, dtype=np.float32)
 
         # Sanity checks
-        if len(obj_pts) < 6:
-            print("Calibration failed: not all 6 tags detected")
+        if len(obj_pts) < 4:
+            print("Calibration failed: not all 4 tags detected")
             print(f"Detected {len(obj_pts)} tags")
             self.status_message = "Calibration failed: missing tags"
             self.next_state = "idle"
@@ -380,21 +380,21 @@ class StateMachine():
         print("camera intrinsics:\n", self.camera.intrinsic_matrix)
         print("distortion coeffs:\n", self.camera.distortion)
 
-        success,  rvec, tvec , _= cv2.solvePnPRansac(
-            obj_pts,
-            img_pts,
-            self.camera.intrinsic_matrix,
-            self.camera.distortion,
-            iterationsCount = 2000, 
-            reprojectionError = 2.0,
+        # success,  rvec, tvec , _= cv2.solvePnPRansac(
+        #     obj_pts,
+        #     img_pts,
+        #     self.camera.intrinsic_matrix,
+        #     self.camera.distortion,
+        #     iterationsCount = 2000, 
+        #     reprojectionError = 2.0,
             
-        )
+        # )
 
-        # [success, rvec, tvec] = cv2.solvePnP(obj_pts,
-        #                             img_pts,
-        #                             self.camera.intrinsic_matrix,
-        #                             self.camera.distortion,
-        #                             flags=cv2.SOLVEPNP_ITERATIVE)
+        [success, rvec, tvec] = cv2.solvePnP(obj_pts,
+                                    img_pts,
+                                    self.camera.intrinsic_matrix,
+                                    self.camera.distortion,
+                                    flags=cv2.SOLVEPNP_ITERATIVE)
 
 
         if not success:
@@ -412,10 +412,9 @@ class StateMachine():
         extrinsic[:3, :3] = R
         extrinsic[:3, 3] = tvec.flatten()
         self.camera.extrinsic_matrix = extrinsic
-        # self.camera._calculateH()
 
         print("Extrinsic Matrix:\n", extrinsic)
-
+        self.camera._calculateH()
         self.status_message = "Calibration - Completed"
         self.next_state = "idle"
         time.sleep(5)

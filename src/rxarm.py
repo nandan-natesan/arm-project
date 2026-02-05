@@ -188,8 +188,8 @@ class RXArm(InterbotixManipulatorXS):
         """
 
         # TODO: Change the following function to FK_pox if you're using PoX
-        ee_T = FK_dh(self.dh_params, self.get_positions(), self.num_joints)
-        # ee_T = FK_pox(self.get_positions(), m_mat=self.M_matrix, s_lst=self.S_list)
+        # ee_T = FK_dh(None, self.get_positions(), self.num_joints)
+        ee_T = FK_pox(self.get_positions(), m_mat=self.M_matrix, s_lst=self.S_list)
 
         ee_pose = get_pose_from_T(ee_T)
         return ee_pose

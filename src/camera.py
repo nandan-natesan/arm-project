@@ -57,7 +57,7 @@ class Camera():
         self.grid_x_points = np.arange(-450, 500, 50)
         self.grid_y_points = np.arange(-175, 525, 50)
         self.grid_points = np.array(np.meshgrid(self.grid_x_points, self.grid_y_points))
-        self.tag_detections = np.array([])
+        self.tag_detections = None
         self.tag_locations = [[-250, -25], [250, -25], [250, 275], [-250, 275]]
         """ block info """
         self.block_contours = np.array([])
@@ -207,10 +207,76 @@ class Camera():
                     (hint: use the cv2.circle function to draw circles on the image)
         """
         modified_image = self.VideoFrame.copy()
+        if self.hasHcalculate is False:
+            return
+        modified_image = self.wrap(modified_image)
+        all_points = self.grid_points.reshape(2, -1).T  # shape (N, 2)
+        for pt in all_points:
+            if self.DepthFrameRaw.any()!=0:
+                pixel_pos = self.world_to_pixel(np.hstack([pt,[0.0]]))
+                cv2.circle(modified_image, (int(pixel_pos[0]), int(pixel_pos[1])), 3, (0, 255, 0), -1)
+
+
+        
         # Write your code here
 
         self.GridFrame = modified_image
-     
+
+    def world_to_pixel(self,Xw):
+
+
+            K = self.intrinsic_matrix.astype(float)
+            D = self.distortion.astype(float)
+
+            T_wc = self.extrinsic_matrix.astype(float)
+            R_wc = T_wc[:3, :3]
+            t_wc = T_wc[:3, 3:4]
+
+            Xw = np.array(Xw, dtype=float).reshape(3,1)
+            Xc = R_wc @ Xw + t_wc
+            Zc = float(Xc[2,0])
+            uv, _ = cv2.projectPoints(Xc.reshape(1,1,3),
+                                    rvec=np.zeros((3,1)),
+                                    tvec=np.zeros((3,1)),
+                                    cameraMatrix=K,
+                                    distCoeffs=D)
+            u_raw, v_raw = uv.reshape(-1,2)[0]
+
+            pts = np.array([[[u_raw, v_raw]]], dtype=float)
+            if self.hasHcalculate is False:
+                self._calculateH()
+            pts_H = cv2.perspectiveTransform(pts, self.H)  # note: H, not inv(H)
+            u, v = float(pts_H[0,0,0]), float(pts_H[0,0,1])
+
+            return u, v, Zc
+
+
+    def pixel_to_world(self, u, v):
+            K = self.intrinsic_matrix.astype(float)
+            D = self.distortion.astype(float)
+            T_wc = self.extrinsic_matrix.astype(float)
+            R_wc = T_wc[:3,:3]
+            t_wc = T_wc[:3,3:4]
+
+            pts = np.array([[[u, v]]], dtype=float)
+            # if not self.camera.hasHcalculate:
+            #     self.camera._calculateH()
+            pts = cv2.perspectiveTransform(pts,np.linalg.inv(self.H))
+            p1 = int(pts[0,0,1])
+            p2 = int(pts[0,0,0])
+            Zc = self.DepthFrameRaw[p1][p2]
+            # undistortPoints with P=I gives normalized points (x,y,1)
+            undist = cv2.undistortPoints(pts, K, D, P=np.eye(3))
+            x_norm, y_norm = undist[0,0,0], undist[0,0,1]
+
+            Xc = np.array([[x_norm * Zc, y_norm * Zc, Zc]], dtype=float).T  # 3x1
+
+            Xw = R_wc.T @ (Xc - t_wc)
+            return Xw.ravel()
+
+
+	
+
     def drawTagsInRGBImage(self, msg):
         """
         @brief      Draw tags from the tag detection                    TODO: Use the tag detections output, to draw the corners/center/tagID of
@@ -246,110 +312,44 @@ class Camera():
             cv2.putText(modified_image, text, (text_x, text_y), font, font_scale, text_color, font_thickness, cv2.LINE_AA)        
     
         
-        # modified_image = self.wrap(modified_image)
+        modified_image = self.wrap(modified_image)
         self.TagImageFrame = modified_image
 
-    # def _calculateH(self):
-    #     print("----- Calculating H called -----")
-    #     if self.tag_detections is None:
-    #         return
-    #     src = np.zeros((4,2))
-    #     for detection in self.tag_detections.detections:
-    #         center_x = int(detection.centre.x)
-    #         center_y = int(detection.centre.y)
-    #         src[detection.id - 1, :] = [center_x, center_y]
+    def _calculateH(self):
+        print("----- Calculating H called -----")
+        if self.tag_detections is None:
+            return
+        src = np.zeros((4,2))
+        for detection in self.tag_detections.detections:
+            center_x = int(detection.centre.x)
+            center_y = int(detection.centre.y)
+            src[detection.id - 1, :] = [center_x, center_y]
         
-    #     x_dim = 1280
-    #     y_dim = 720
-    #     # scale = 1000
-    #     scale =0.4
-    #     x_off = 0.35*x_dim
-    #     y_off = 0.3*y_dim
-    #     dst = np.array([x_off                , y_off+0.6*scale*x_dim, 
-    #                     x_off + scale * x_dim, y_off+0.6*scale*x_dim,
-    #                     x_off +scale * x_dim , y_off,
-    #                     x_off                , y_off]).reshape((4,2))
+        x_dim = 1280
+        y_dim = 720
+        # scale = 1000
+        scale =0.4
+        x_off = 0.35*x_dim
+        y_off = 0.3*y_dim
+        dst = np.array([x_off                , y_off+0.6*scale*x_dim, 
+                        x_off + scale * x_dim, y_off+0.6*scale*x_dim,
+                        x_off +scale * x_dim , y_off,
+                        x_off                , y_off]).reshape((4,2))
 
  
-    #     self.H = cv2.findHomography(src, dst)[0]
-    #     # print(f"H:\n{self.H}")
-    #     self.hasHcalculate = True
+        self.H = cv2.findHomography(src, dst)[0]
+        print(f"H:\n{self.H}")
+        self.hasHcalculate = True
 
         
-    # def wrap(self,image):
-    #     # if not self.hasHcalculate:
-    #     #     self._calculateH()
-    #     new_img = cv2.warpPerspective(image, self.H, (image.shape[1], image.shape[0]))
-    #     cv2.imwrite("test.jpg",new_img)
-    #     return new_img
-
-    def pixel_to_camera(self, u: float, v: float, d_mm: float):
-        """
-        Back-project pixel (u,v) with depth d_mm (mm) into camera coordinates (mm)
-        using explicit K^{-1}.
-        """
-        if d_mm is None or d_mm <= 0:
-            return None
-
-        K = self.intrinsic_matrix.astype(float)  # 3x3
-        K_inv = np.linalg.inv(K)
-
-        uv1 = np.array([float(u), float(v), 1.0], dtype=float)  # homogeneous pixel
-        ray = K_inv @ uv1  # normalized ray: [x/z, y/z, 1]
-
-        z = float(d_mm)  # mm
-        Xc = ray * z     # [x, y, z] in mm
-        return Xc
+    def wrap(self,image):
+        # if not self.hasHcalculate:
+        #     self._calculateH()
+        new_img = cv2.warpPerspective(image, self.H, (image.shape[1], image.shape[0]))
+        cv2.imwrite("test.jpg",new_img)
+        return new_img
 
 
-    def camera_to_world(self, p_cam_mm: np.ndarray):
-        """Map camera-frame point (mm) to world-frame (mm) using T_wc."""
-        p_h = np.ones((4, 1), dtype=float)
-        p_h[:3, 0] = p_cam_mm.reshape(3)
-        p_w = (np.linalg.inv(self.extrinsic_matrix) @ p_h)[:3, 0]
-        return p_w
-
-    def pixel_to_world(self, u: int, v: int):
-        """!
-        @brief      Map a pixel (u,v) to world coordinates using depth + calibration.
-
-        Depth image from the ROS driver is a uint16 in millimeters.
-        Returns (3,) in mm.
-        """
-        if self.DepthFrameRaw is None or self.DepthFrameRaw.size == 0:
-            return None
-        if v < 0 or v >= self.DepthFrameRaw.shape[0] or u < 0 or u >= self.DepthFrameRaw.shape[1]:
-            return None
-        d = float(self.DepthFrameRaw[v, u])
-        p_cam = self.pixel_to_camera(u, v, d)
-        if p_cam is None:
-            return None
-        return self.camera_to_world(p_cam)
-
-    # def world_to_pixel(self, p_world_mm: np.ndarray):
-    #     """!
-    #     @brief      Project a world point (mm) into pixel coordinates (u,v).
-
-    #     Uses T_cw = inv(T_wc) and pinhole intrinsics.
-    #     """
-    #     try:
-    #         T_cw = np.linalg.inv(self.extrinsic_matrix)
-    #     except np.linalg.LinAlgError:
-    #         return None
-
-    #     p_h = np.ones((4, 1), dtype=float)
-    #     p_h[:3, 0] = p_world_mm.reshape(3)
-    #     p_c = (T_cw @ p_h)[:3, 0]
-    #     Xc, Yc, Zc = float(p_c[0]), float(p_c[1]), float(p_c[2])
-    #     if Zc <= 1e-6:
-    #         return None
-
-    #     K = self.intrinsic_matrix
-    #     fx, fy = float(K[0, 0]), float(K[1, 1])
-    #     cx, cy = float(K[0, 2]), float(K[1, 2])
-    #     u = int(round((Xc / Zc) * fx + cx))
-    #     v = int(round((Yc / Zc) * fy + cy))
-    #     return (u, v)
 
 
 
