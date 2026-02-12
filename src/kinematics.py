@@ -138,43 +138,34 @@ def FK_dh(dh_params, joint_angles, link):
     
     # 1. Prepare the parameters
     # Use copy=True to avoid modifying the original dh_params list passed by the user
-    params = np.array([[0,1.570796327,103.91,0],
-                         [200,0,0,1.570796327],
-                         [200,0,0,-1.570796327],
-                         [0,1.570796327,0,1.570796327],
-                         [0,0,65,0],
-                         [0,0,66,0]])
     # params = np.array(dh_params, copy=True)
+    params = np.array([[0,1.570796327,103.91,0],
+                       [205.73,0,0,1.3342],
+                       [200,0,0,-1.3342],
+                       [0,1.570796327,0,1.570796327],
+                       [0,0,174.15,0]])
     
     # Add current joint angles to the theta column (index 3)
     # This combines the static offset (from DH table) with the dynamic angle (from motors)
     # params[i, 3] = theta_offset + joint_angle
     num_joints = len(joint_angles)
-    print(num_joints)
 
+    params[:3, 3] -= joint_angles[:3]
+    params[3, 3] -= joint_angles[3]
+    params[4, 3] -= joint_angles[4]
+
+    # params[:num_joints, 3] += joint_angles
     
-
-    params[0:3, 3] -= joint_angles[0:3]
-
-    params[3,3] += joint_angles[3]
-
-    params[5,3] += joint_angles[4]
-
     # 2. Initialize the global transformation as Identity
     T_base = np.array([
-    [ 0,  -1,  0,  0],
+    [ 0,  1,  0,  0],
     [1,  0,  0,  0],
     [ 0,  0,  1,  0],
     [ 0,  0,  0,  1]
 ])
 
-    T_global = T_base  # Initialize with the base offset
-    
-    # 3. Chain the transformations
-    # Loop from 0 up to 'link'. 
-    # If link=1, we do range(1) -> i=0 -> computes T_01
-    # If link=3, we do range(3) -> i=0,1,2 -> computes T_01 * T_12 * T_23
-    for i in range(link + 1):
+    T_global = T_base 
+    for i in range(link):
         row = params[i]
         
         # Extract DH parameters for this row
@@ -190,6 +181,8 @@ def FK_dh(dh_params, joint_angles, link):
         T_global = np.dot(T_global, T_link)
         
     return T_global
+
+        
 
 
 def get_euler_angles_from_T(T):
