@@ -351,6 +351,9 @@ def IK_geometric(dh_params, pose):
 
     pose_world = np.asarray(pose, dtype=float)
 
+    pose_xyz = pose_world[0:3]
+    pose_xyz = np.append(pose_xyz, 1.0) # homogeneous coordinates for transformation
+
     # transform input pose from world to robot frame
     T_base = np.array([
     [ 0,  1,  0,  0],
@@ -358,11 +361,12 @@ def IK_geometric(dh_params, pose):
     [ 0,  0,  1,  0],
     [ 0,  0,  0,  1]
     ])
-    pose_robot = np.dot(T_base, pose_world[:3])
+    pose_robot = np.dot(T_base, pose_xyz)
     
     # extract x, y, z, psi from pose_world
     x_p, y_p, z_p = pose_robot[0], pose_robot[1], pose_robot[2]
-    psi = pose[4]
+    psi = pose_world[3]
+
     # psi = wrist pitch about x/y horizontal plane
     # ensure angles are between pi and -pi
     psi = clamp(psi)
@@ -454,66 +458,66 @@ def IK_solutionfilter(q_IKsol, q_curr, wrist_phi):
     #Map angle(s) to (-pi, pi]. Works on scalars or arrays.
         return (a + np.pi) % (2 * np.pi) - np.pi
 
-        joint_limits = [
-            (-np.pi, np.pi), # th1, waist
-            (-108*np.pi/180, 113*np.pi/180), # th2, shoulder
-            (-108*np.pi/180, 93*np.pi/180), # th3, elbow
-            (-100*np.pi/180, 123*np.pi/180), # th4, wrist pitch
-            (-np.pi, np.pi) # th5, wrist roll
-            ]
+    joint_limits = [
+        (-np.pi, np.pi), # th1, waist
+        (-108*np.pi/180, 113*np.pi/180), # th2, shoulder
+        (-108*np.pi/180, 93*np.pi/180), # th3, elbow
+        (-100*np.pi/180, 123*np.pi/180), # th4, wrist pitch
+        (-np.pi, np.pi) # th5, wrist roll
+        ]
 
-        # penalize movement of particular joints by assigning weights
-        w = np.array([1.0, 1.0, 1.0, 1.0], dtype=float)
+    # penalize movement of particular joints by assigning weights
+    w = np.array([1.0, 1.0, 1.0, 1.0], dtype=float)
 
-        q_IKsol = np.asarray(q_IKsol, dtype=float)
-        q_curr = np.asarray(q_curr, dtype=float).reshape(-1)
+    q_IKsol = np.asarray(q_IKsol, dtype=float)
+    q_curr = np.asarray(q_curr, dtype=float).reshape(-1)
 
-        if q_IKsol.ndim != 2 or q_IKsol.shape[1] != 4:
-            raise ValueError(f"q_IKsol must be shape (M,4); got {q_IKsol.shape}")
-        if q_curr.size < 4:
-            raise ValueError(f"q_curr must have at least 4 elements; got {q_curr.size}")
+    if q_IKsol.ndim != 2 or q_IKsol.shape[1] != 4:
+        raise ValueError(f"q_IKsol must be shape (M,4); got {q_IKsol.shape}")
+    if q_curr.size < 4:
+        raise ValueError(f"q_curr must have at least 4 elements; got {q_curr.size}")
 
-        # Wrap current joints to (-pi, pi]
-        q_curr4 = wrap_to_pi(q_curr[:4])
+    # Wrap current joints to (-pi, pi]
+    q_curr4 = wrap_to_pi(q_curr[:4])
 
-        # Wrap desired wrist roll
-        th5 = wrap_to_pi(float(wrist_phi))
+    # Wrap desired wrist roll
+    th5 = wrap_to_pi(float(wrist_phi))
 
-        # assign default variables for comparison
-        q_best = None
-        best_cost = np.inf
+    # assign default variables for comparison
+    q_best = None
+    best_cost = np.inf
 
-        for q_4 in q_IKsol:
-            # wrap to [-pi, pi]
-            q_4 = wrap_to_pi(np.asarray(q_4, dtype=float))
+    for q_4 in q_IKsol:
+        # wrap to [-pi, pi]
+        q_4 = wrap_to_pi(np.asarray(q_4, dtype=float))
 
-            # build 5-joint candidate using wrapped th5
-            q_test = np.array([q_4[0], q_4[1], q_4[2], q_4[3], th5], dtype=float)
+        # build 5-joint candidate using wrapped th5
+        q_test = np.array([q_4[0], q_4[1], q_4[2], q_4[3], th5], dtype=float)
 
-            # check potential solution against joint limits
-            feasible = True
-            for j in range(5):
-                mn, mx = joint_limits[j]
-                if not (mn <= q_test[j] <= mx):
-                    feasible = False
-                    break
-            if not feasible:
-                continue
+        # check potential solution against joint limits
+        feasible = True
+        for j in range(5):
+            mn, mx = joint_limits[j]
+            if not (mn <= q_test[j] <= mx):
+                feasible = False
+                break
+        if not feasible:
+            continue
 
-            # assign cost to current potential solution
-            dq = wrap_to_pi(q_4 - q_curr4)
-            cost = float(np.sum(w * dq * dq))
+        # assign cost to current potential solution
+        dq = wrap_to_pi(q_4 - q_curr4)
+        cost = float(np.sum(w * dq * dq))
 
-            # optional singularity avoidance
-            cost += 0.05 / (abs(np.sin(q_4[2])) + 1e-3)
+        # optional singularity avoidance
+        cost += 0.05 / (abs(np.sin(q_4[2])) + 1e-3)
 
-            # compare cost of potential solution to current best
-            if cost < best_cost:
-                best_cost = cost
-                q_best = q_test
-        # catch for no potential solutions
-        if q_best is None:
-            raise ValueError("No feasible IK candidate within joint limits.")
+        # compare cost of potential solution to current best
+        if cost < best_cost:
+            best_cost = cost
+            q_best = q_test
+    # catch for no potential solutions
+    if q_best is None:
+        raise ValueError("No feasible IK candidate within joint limits.")
 
-        # return the best configuration
-        return q_best
+    # return the best configuration
+    return q_best

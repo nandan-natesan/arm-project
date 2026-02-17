@@ -7,7 +7,7 @@ import numpy as np
 import rclpy
 import cv2
 from cv_bridge import CvBridge
-
+from kinematics import IK_geometric, IK_solutionfilter
 class StateMachine():
     """!
     @brief      This class describes a state machine.
@@ -212,22 +212,32 @@ class StateMachine():
         """!
         @brief      Pickup block at mouse clicked position
         """
-        self.current_state = "click_to_grab"
+        print(f"Click to Grab - Waiting for click input...")
+
         # get mouse click position in image coords
-        pt = mouse_event.pos
-        z = self.camera.DepthFrameRaw[x, y]
-        x, y = self.camera.pixel_to_world(pt.x(), pt.y())
+        if not getattr(self.camera, "new_click", False):
+            return
+        
+        u = int(self.camera.last_click[0])
+        v = int(self.camera.last_click[1])
+        self.camera.new_click = False  # reset click flag
+        print(f"Received click at pixel coords: (u={u}, v={v})")
+
+        p_world = self.camera.pixel_to_world(u, v)
+
+        x_w, y_w, z_wc = float(p_world[0]), float(p_world[1]), float(p_world[2])
+        
         #set dummy psi for now
-        psi = np.pi
+        psi = 0
+
         # set required pose and obtain IK solutions
-        pose_world = [x, y, z, psi]
-        print(f"Clicked point: pose_world={pose_world}")
+        pose_world = [x_w, y_w, z_wc, psi]
+        print(f"Target world pose from click: {pose_world}")
         params = np.array([[0,1.570796327,103.91,0],
                        [205.73,0,0,1.3342],
                        [200,0,0,-1.3342],
                        [0,1.570796327,0,1.570796327],
                        [0,0,174.15,0]])
-        print(f"DH parameters:\n{params}")
         IK_sols = IK_geometric(params, pose_world)
         print(f"IK solutions:\n{IK_sols}")
         # get current joint angles to filter IK solutions
