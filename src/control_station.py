@@ -126,6 +126,8 @@ class Gui(QMainWindow):
         self.ui.btnUser6.clicked.connect(partial(nxt_if_arm_init, 'teach_play'))
         self.ui.btnUser7.setText('Calibrate')
         self.ui.btnUser7.clicked.connect(partial(nxt_if_arm_init, 'calibrate'))
+        self.ui.btnUser8.setText('Click to Grab')
+        self.ui.btnUser8.clicked.connect(partial(nxt_if_arm_init, 'click_to_grab'))
         
         # Sliders
         for sldr in self.joint_sliders:

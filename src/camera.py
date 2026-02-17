@@ -334,7 +334,7 @@ class Camera():
                 if aspect_ratio > 3: continue 
                 
                 rect_area = width * height
-                if rect_area < 50 or rect_area > 3000: continue
+                # if rect_area < 50 or rect_area > 3000: continue
 
                 # --- D. DEPTH VERIFICATION ---
                 cX, cY = int(center_x), int(center_y)
@@ -346,7 +346,7 @@ class Camera():
                 z_val = self.WorldHeightMap[cY, cX]
 
                 # Threshold: Block must have real physical height (ignore flat stickers)
-                if z_val < 15:
+                if z_val < 5:
                     continue
 
                 # --- E. DUPLICATE CHECK ---

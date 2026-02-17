@@ -336,15 +336,184 @@ def to_s_matrix(w, v):
 
 
 def IK_geometric(dh_params, pose):
+
+    tol = 1e-6
+
+    #---------
+    # parse data from inputs
+    #---------
+    # assign geometry from dh params
+    dh_params = np.asarray(dh_params, dtype=float)
+    l1 = dh_params[1, 0] #a2
+    l2 = dh_params[2, 0] #a3
+    d1 = dh_params[0, 2] #base height
+    Lt = dh_params[4, 2] #tool offset (d5)
+
+    pose_world = np.asarray(pose, dtype=float)
+
+    # transform input pose from world to robot frame
+    T_base = np.array([
+    [ 0,  1,  0,  0],
+    [1,  0,  0,  0],
+    [ 0,  0,  1,  0],
+    [ 0,  0,  0,  1]
+    ])
+    pose_robot = np.dot(T_base, pose_world[:3])
+    
+    # extract x, y, z, psi from pose_world
+    x_p, y_p, z_p = pose_robot[0], pose_robot[1], pose_robot[2]
+    psi = pose[4]
+    # psi = wrist pitch about x/y horizontal plane
+    # ensure angles are between pi and -pi
+    psi = clamp(psi)
+    
+    #---------
+    # determine theta1 for joint 1 (base yaw)
+    #---------
+    # project pose x, y onto horizontal (x,y) plane
+    r_xy = np.hypot(x_p, y_p)
+    # check if degenerate case
+    if r_xy < tol:
+        # end located on z axis - arm is in singular configuration
+        # infinite solutions therefore return two representative yaw angles
+        th1_list = [0.0, np.pi]
+    else:
+        th1_list = [np.arctan2(y_p, x_p), np.arctan2(y_p, x_p)+np.pi]
+    
+    # reduce problem to 2D RR elbow starting at joint 2
+    z_0 = z_p - d1
+    
+    sols = []
+    # -------
+    # determine theta3 for joint 3
+    #---------
+    for th1 in th1_list:
+        th1 = clamp(th1)
+    #determine r using th1
+        r = np.cos(th1) * x_p + np.sin(th1) * y_p
+        # determine wrist center using 2D RR elbow
+        r_wc = r - Lt * np.cos(psi)
+        z_wc = z_0 - Lt * np.sin(psi)
+
+        # assign distance from shoulder to wrist (l3) for clarity
+        l3 = np.hypot(r_wc, z_wc)
+        # calculate cos(theta_3)
+        
+        c3 = (l3**2 - l1**2 - l2**2) / (2 * l1 * l2)
+        #check if degenerate condition
+        if c3 > 1.0 + tol or c3 < -1.0 - tol:
+            # cannot reach position with this branch
+            continue
+        else:
+            c3 = np.clip(c3, -1.0, 1.0)
+
+        # calc theta for joint 3    
+        # two outputs depending on sign
+        th3_list = [np.arccos(c3), -np.arccos(c3)]
+
+        # -------
+        # determine theta2 for joint 2
+        #---------
+        for th3 in th3_list:
+            # check singularity for shoulder/wrist
+            if l3 < tol:
+                th2 = 0.0
+            # calc theta2 for joint 2
+            else:
+                th2 = np.arctan2(z_wc, r_wc) - np.arctan2(l2*np.sin(th3), l1 + l2*np.cos(th3))
+
+            # calc theta for joint 4 given theta2 and theta3
+            # assuming single orientation angle defined as the angle from the x-y base plane
+            th4 = psi - (th2 + th3)
+            # -------
+            # build 4x4 solution output
+            #---------
+            # th1, th2, th3, th4
+            # base, shoulder, elbow, wrist pitch
+            # 2 x base orientations (left/ right)
+            # 2 x elbow orientations (up/ down)
+            sols.append([th1, th2, th3, th4])
+
+    if len(sols) == 0:
+        raise ValueError("Pose is not in workspace - cannot reach position")
+    else:
+        return np.array(sols, dtype=float)
+
+def IK_solutionfilter(q_IKsol, q_curr, wrist_phi):
     """!
-    @brief      Get all possible joint configs that produce the pose.
+    @jbrief Filters possible joint configs that produce goal pose to select best candidate for motion planning
 
-                TODO: Convert a desired end-effector pose vector as np.array to joint angles
+    @param q_IKsol Solutions provided by IK_geometric, shape (M,4)
+    @param q_curr Current joint positions from RXARM, shape (5,)
+    @param wrist_phi Desired wrist roll angle (th5)
 
-    @param      dh_params  The dh parameters
-    @param      pose       The desired pose vector as np.array 
-
-    @return     All four possible joint configurations in a numpy array 4x4 where each row is one possible joint
-                configuration
+    @return Best joint configuration array, shape (5,1) [th1, th2, th3, th4, th5]
     """
-    pass
+
+    def wrap_to_pi(a):
+    #Map angle(s) to (-pi, pi]. Works on scalars or arrays.
+        return (a + np.pi) % (2 * np.pi) - np.pi
+
+        joint_limits = [
+            (-np.pi, np.pi), # th1, waist
+            (-108*np.pi/180, 113*np.pi/180), # th2, shoulder
+            (-108*np.pi/180, 93*np.pi/180), # th3, elbow
+            (-100*np.pi/180, 123*np.pi/180), # th4, wrist pitch
+            (-np.pi, np.pi) # th5, wrist roll
+            ]
+
+        # penalize movement of particular joints by assigning weights
+        w = np.array([1.0, 1.0, 1.0, 1.0], dtype=float)
+
+        q_IKsol = np.asarray(q_IKsol, dtype=float)
+        q_curr = np.asarray(q_curr, dtype=float).reshape(-1)
+
+        if q_IKsol.ndim != 2 or q_IKsol.shape[1] != 4:
+            raise ValueError(f"q_IKsol must be shape (M,4); got {q_IKsol.shape}")
+        if q_curr.size < 4:
+            raise ValueError(f"q_curr must have at least 4 elements; got {q_curr.size}")
+
+        # Wrap current joints to (-pi, pi]
+        q_curr4 = wrap_to_pi(q_curr[:4])
+
+        # Wrap desired wrist roll
+        th5 = wrap_to_pi(float(wrist_phi))
+
+        # assign default variables for comparison
+        q_best = None
+        best_cost = np.inf
+
+        for q_4 in q_IKsol:
+            # wrap to [-pi, pi]
+            q_4 = wrap_to_pi(np.asarray(q_4, dtype=float))
+
+            # build 5-joint candidate using wrapped th5
+            q_test = np.array([q_4[0], q_4[1], q_4[2], q_4[3], th5], dtype=float)
+
+            # check potential solution against joint limits
+            feasible = True
+            for j in range(5):
+                mn, mx = joint_limits[j]
+                if not (mn <= q_test[j] <= mx):
+                    feasible = False
+                    break
+            if not feasible:
+                continue
+
+            # assign cost to current potential solution
+            dq = wrap_to_pi(q_4 - q_curr4)
+            cost = float(np.sum(w * dq * dq))
+
+            # optional singularity avoidance
+            cost += 0.05 / (abs(np.sin(q_4[2])) + 1e-3)
+
+            # compare cost of potential solution to current best
+            if cost < best_cost:
+                best_cost = cost
+                q_best = q_test
+        # catch for no potential solutions
+        if q_best is None:
+            raise ValueError("No feasible IK candidate within joint limits.")
+
+        # return the best configuration
+        return q_best

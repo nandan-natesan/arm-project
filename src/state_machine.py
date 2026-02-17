@@ -89,6 +89,9 @@ class StateMachine():
 
         if self.next_state == "teach_play":
             self.teach_play()
+
+        if self.next_state == "click_to_grab":
+            self.click_to_grab()
         
 
     """Functions run for each state"""
@@ -132,7 +135,6 @@ class StateMachine():
         self.status_message = "State: Execute - Completed motion plan"
 
         self.next_state = "idle"
-
 
     def detect(self):
         """!
@@ -205,6 +207,41 @@ class StateMachine():
             self.status_message = "State: Teach & Play - Completed all taught waypoints"
 
         self.next_state = "idle"    
+
+    def click_to_grab(self):
+        """!
+        @brief      Pickup block at mouse clicked position
+        """
+        self.current_state = "click_to_grab"
+        # get mouse click position in image coords
+        pt = mouse_event.pos
+        z = self.camera.DepthFrameRaw[x, y]
+        x, y = self.camera.pixel_to_world(pt.x(), pt.y())
+        #set dummy psi for now
+        psi = np.pi
+        # set required pose and obtain IK solutions
+        pose_world = [x, y, z, psi]
+        print(f"Clicked point: pose_world={pose_world}")
+        params = np.array([[0,1.570796327,103.91,0],
+                       [205.73,0,0,1.3342],
+                       [200,0,0,-1.3342],
+                       [0,1.570796327,0,1.570796327],
+                       [0,0,174.15,0]])
+        print(f"DH parameters:\n{params}")
+        IK_sols = IK_geometric(params, pose_world)
+        print(f"IK solutions:\n{IK_sols}")
+        # get current joint angles to filter IK solutions
+        q_curr = self.rxarm.get_positions()
+        print(f"Current joint angles: {q_curr}")
+        IK_res = IK_solutionfilter(IK_sols, q_curr, psi)
+        print(f"Selected IK solution: {IK_res}")
+        # set joint positions to best IK solution
+        if IK_res is not None:
+            self.rxarm.set_positions(IK_res)
+            self.rxarm.gripper.grasp()
+        else:
+            self.status_message = "No valid IK solution found for clicked point"
+        self.next_state = "idle"
 
     # def calibrate(self):
     #     self.current_state = "calibrate"
