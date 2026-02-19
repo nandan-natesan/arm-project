@@ -334,7 +334,7 @@ class Camera():
                 if aspect_ratio > 3: continue 
                 
                 rect_area = width * height
-                # if rect_area < 50 or rect_area > 3000: continue
+                if rect_area < 50 or rect_area > 3000: continue
 
                 # --- D. DEPTH VERIFICATION ---
                 cX, cY = int(center_x), int(center_y)

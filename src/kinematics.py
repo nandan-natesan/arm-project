@@ -164,7 +164,7 @@ def FK_dh(dh_params, joint_angles, link):
     [ 0,  0,  0,  1]
 ])
 
-    T_global = T_base 
+    T_global = T_base
     for i in range(link):
         row = params[i]
         
@@ -180,9 +180,7 @@ def FK_dh(dh_params, joint_angles, link):
         # Multiply to the global transform (order matters: T_current * T_new)
         T_global = np.dot(T_global, T_link)
         
-    return T_global
-
-        
+    return T_global    
 
 
 def get_euler_angles_from_T(T):
@@ -226,7 +224,6 @@ def get_euler_angles_from_T(T):
     return np.array([alpha, beta, gamma])
 
 
-
 def get_pose_from_T(T):
     """!
     @brief      Gets the pose from T.
@@ -250,7 +247,6 @@ def get_pose_from_T(T):
     
     return [x, y, z, roll, pitch, yaw]
 
-
 def FK_pox(joint_angles, m_mat, s_lst):
     """!
     @brief      Get a representing the pose of the desired link
@@ -265,18 +261,18 @@ def FK_pox(joint_angles, m_mat, s_lst):
     # 1. Initialize the transformation matrix as Identity
     # This will accumulate the joint transformations: T = e^(S1*t1) * e^(S2*t2) ...
     T = np.eye(4)
-#     m_mat = np.array([[1.0,0.0,0.0,408.575]
-# [0.0,1.0,0.0,0.0],
-#     [0.0,0.0,1.0,304.57],
-# [0.0,0.0,0.0,1.0]
-# ])    
-#     s_lst = np.array([[0.0,0.0,0.0,0.0,1.0],
-#     [0.0,1.0,1.0,1.0,0.0],
-#     [0.0,-104.57,-304.57,-304.57,0.0],
-#     [0.0,0.0,0.0,0.0,304.57],
-#     [0.0,0.0,50,250,0.0],
-#     ])
-# screw vectors
+    #     m_mat = np.array([[1.0,0.0,0.0,408.575]
+    # [0.0,1.0,0.0,0.0],
+    #     [0.0,0.0,1.0,304.57],
+    # [0.0,0.0,0.0,1.0]
+    # ])    
+    #     s_lst = np.array([[0.0,0.0,0.0,0.0,1.0],
+    #     [0.0,1.0,1.0,1.0,0.0],
+    #     [0.0,-104.57,-304.57,-304.57,0.0],
+    #     [0.0,0.0,0.0,0.0,304.57],
+    #     [0.0,0.0,50,250,0.0],
+    #     ])
+    # screw vectors
     m_mat = np.array(m_mat)
     s_lst = np.array(s_lst)
     # 2. Iterate through each joint
@@ -310,8 +306,6 @@ def FK_pox(joint_angles, m_mat, s_lst):
             [ 0,  0,  1,  0],
             [ 0,  0,  0,  1]
         ])
-        
-   
 
     # Pre-multiply by the base frame transformation
     T_final = np.dot(T_base, T_robot)
@@ -335,189 +329,64 @@ def to_s_matrix(w, v):
     pass
 
 
-def IK_geometric(dh_params, pose):
-
-    tol = 1e-6
-
-    #---------
-    # parse data from inputs
-    #---------
-    # assign geometry from dh params
-    dh_params = np.asarray(dh_params, dtype=float)
-    l1 = dh_params[1, 0] #a2
-    l2 = dh_params[2, 0] #a3
-    d1 = dh_params[0, 2] #base height
-    Lt = dh_params[4, 2] #tool offset (d5)
-
-    pose_world = np.asarray(pose, dtype=float)
-
-    pose_xyz = pose_world[0:3]
-    pose_xyz = np.append(pose_xyz, 1.0) # homogeneous coordinates for transformation
-
-    # transform input pose from world to robot frame
-    T_base = np.array([
-    [ 0,  1,  0,  0],
-    [1,  0,  0,  0],
-    [ 0,  0,  1,  0],
-    [ 0,  0,  0,  1]
-    ])
-    pose_robot = np.dot(T_base, pose_xyz)
-    
-    # extract x, y, z, psi from pose_world
-    x_p, y_p, z_p = pose_robot[0], pose_robot[1], pose_robot[2]
-    psi = pose_world[3]
-
-    # psi = wrist pitch about x/y horizontal plane
-    # ensure angles are between pi and -pi
-    psi = clamp(psi)
-    
-    #---------
-    # determine theta1 for joint 1 (base yaw)
-    #---------
-    # project pose x, y onto horizontal (x,y) plane
-    r_xy = np.hypot(x_p, y_p)
-    # check if degenerate case
-    if r_xy < tol:
-        # end located on z axis - arm is in singular configuration
-        # infinite solutions therefore return two representative yaw angles
-        th1_list = [0.0, np.pi]
-    else:
-        th1_list = [np.arctan2(y_p, x_p), np.arctan2(y_p, x_p)+np.pi]
-    
-    # reduce problem to 2D RR elbow starting at joint 2
-    z_0 = z_p - d1
-    
-    sols = []
-    # -------
-    # determine theta3 for joint 3
-    #---------
-    for th1 in th1_list:
-        th1 = clamp(th1)
-    #determine r using th1
-        r = np.cos(th1) * x_p + np.sin(th1) * y_p
-        # determine wrist center using 2D RR elbow
-        r_wc = r - Lt * np.cos(psi)
-        z_wc = z_0 - Lt * np.sin(psi)
-
-        # assign distance from shoulder to wrist (l3) for clarity
-        l3 = np.hypot(r_wc, z_wc)
-        # calculate cos(theta_3)
-        
-        c3 = (l3**2 - l1**2 - l2**2) / (2 * l1 * l2)
-        #check if degenerate condition
-        if c3 > 1.0 + tol or c3 < -1.0 - tol:
-            # cannot reach position with this branch
-            continue
-        else:
-            c3 = np.clip(c3, -1.0, 1.0)
-
-        # calc theta for joint 3    
-        # two outputs depending on sign
-        th3_list = [np.arccos(c3), -np.arccos(c3)]
-
-        # -------
-        # determine theta2 for joint 2
-        #---------
-        for th3 in th3_list:
-            # check singularity for shoulder/wrist
-            if l3 < tol:
-                th2 = 0.0
-            # calc theta2 for joint 2
-            else:
-                th2 = np.arctan2(z_wc, r_wc) - np.arctan2(l2*np.sin(th3), l1 + l2*np.cos(th3))
-
-            # calc theta for joint 4 given theta2 and theta3
-            # assuming single orientation angle defined as the angle from the x-y base plane
-            th4 = psi - (th2 + th3)
-            # -------
-            # build 4x4 solution output
-            #---------
-            # th1, th2, th3, th4
-            # base, shoulder, elbow, wrist pitch
-            # 2 x base orientations (left/ right)
-            # 2 x elbow orientations (up/ down)
-            sols.append([th1, th2, th3, th4])
-
-    if len(sols) == 0:
-        raise ValueError("Pose is not in workspace - cannot reach position")
-    else:
-        return np.array(sols, dtype=float)
-
-def IK_solutionfilter(q_IKsol, q_curr, wrist_phi):
+def IK_geometric(pose):
     """!
-    @jbrief Filters possible joint configs that produce goal pose to select best candidate for motion planning
-
-    @param q_IKsol Solutions provided by IK_geometric, shape (M,4)
-    @param q_curr Current joint positions from RXARM, shape (5,)
-    @param wrist_phi Desired wrist roll angle (th5)
-
-    @return Best joint configuration array, shape (5,1) [th1, th2, th3, th4, th5]
+    @brief      Calculates joint angles for a desired end-effector pose
+    @param      pose       The desired pose vector as np.array [x, y, z] in world coords
+    @return     Joint configuration in a numpy array 4x1 where each col is angle for eaach joint
     """
 
-    def wrap_to_pi(a):
-    #Map angle(s) to (-pi, pi]. Works on scalars or arrays.
-        return (a + np.pi) % (2 * np.pi) - np.pi
+    # geometry
+    l1 = 103.91
+    l2 = 205.73
+    l3 = 200.0
+    l4 = 174.15
+    psi = -np.pi/2  # fixed approach angle (down)
 
-    joint_limits = [
-        (-np.pi, np.pi), # th1, waist
-        (-108*np.pi/180, 113*np.pi/180), # th2, shoulder
-        (-108*np.pi/180, 93*np.pi/180), # th3, elbow
-        (-100*np.pi/180, 123*np.pi/180), # th4, wrist pitch
-        (-np.pi, np.pi) # th5, wrist roll
-        ]
+    #extract x, y, z from pose
+    x_p, y_p, z_p = float(pose[0]), float(pose[1]), float(pose[2])
 
-    # penalize movement of particular joints by assigning weights
-    w = np.array([1.0, 1.0, 1.0, 1.0], dtype=float)
+    # base yaw/ theta1
+    theta1 = np.arctan2(-x_p, y_p)
 
-    q_IKsol = np.asarray(q_IKsol, dtype=float)
-    q_curr = np.asarray(q_curr, dtype=float).reshape(-1)
+    # 2D RR planar coords at shoulder
+    x0 = np.hypot(x_p, y_p)
+    y0 = z_p - l1
 
-    if q_IKsol.ndim != 2 or q_IKsol.shape[1] != 4:
-        raise ValueError(f"q_IKsol must be shape (M,4); got {q_IKsol.shape}")
-    if q_curr.size < 4:
-        raise ValueError(f"q_curr must have at least 4 elements; got {q_curr.size}")
+    # wrist center
+    x_wc = x0 - l4 * np.cos(psi)
+    y_wc = y0 - l4 * np.sin(psi)
 
-    # Wrap current joints to (-pi, pi]
-    q_curr4 = wrap_to_pi(q_curr[:4])
+    # reach
+    l_wc2 = x_wc**2 + y_wc**2
+    l_wc = np.sqrt(l_wc2)
 
-    # Wrap desired wrist roll
-    th5 = wrap_to_pi(float(wrist_phi))
+    # reachability check
+    if l_wc > (l2 + l3) + 1e-6 or l_wc < abs(l2 - l3) - 1e-6:
+        return None
 
-    # assign default variables for comparison
-    q_best = None
-    best_cost = np.inf
+    # shoulder geometry alpha/ gamma1 / gamma2
+    c = (l_wc2 - l2**2 - l3**2) / (2.0*l2*l3)
+    c = np.clip(c, -1.0, 1.0)
+    s = np.sqrt(max(0.0, 1.0 - c*c))   # elbow-down
+    alpha = np.arctan2(s, c)           # alpha in [0, pi]
+    gamma1 = np.arctan2(y_wc, x_wc)
+    gamma2 = np.arctan2(l3*np.sin(alpha), l2 + l3*np.cos(alpha))
 
-    for q_4 in q_IKsol:
-        # wrap to [-pi, pi]
-        q_4 = wrap_to_pi(np.asarray(q_4, dtype=float))
+    # shoulder and elbow / theta2, theta3
+    theta2 = np.pi/2 - gamma1 - gamma2
+    theta3 = alpha
 
-        # build 5-joint candidate using wrapped th5
-        q_test = np.array([q_4[0], q_4[1], q_4[2], q_4[3], th5], dtype=float)
+    #wrist pitch and roll / theta4, theta5
+    theta4 = np.pi/2 - psi - theta2 - theta3
+    theta5 = 0.0
+    #should implement theta5 off theta1
 
-        # check potential solution against joint limits
-        feasible = True
-        for j in range(5):
-            mn, mx = joint_limits[j]
-            if not (mn <= q_test[j] <= mx):
-                feasible = False
-                break
-        if not feasible:
-            continue
+    # Convert geometric to motor angles
+    q1 = theta1
+    q2 = theta2 - 0.245 # compensate for 'hidden link' - l2 used in geometry calculation
+    q3 = theta3 - 1.3258 # compensate for joint 3 frame rotation by beta
+    q4 = theta4
+    q5 = theta5
 
-        # assign cost to current potential solution
-        dq = wrap_to_pi(q_4 - q_curr4)
-        cost = float(np.sum(w * dq * dq))
-
-        # optional singularity avoidance
-        cost += 0.05 / (abs(np.sin(q_4[2])) + 1e-3)
-
-        # compare cost of potential solution to current best
-        if cost < best_cost:
-            best_cost = cost
-            q_best = q_test
-    # catch for no potential solutions
-    if q_best is None:
-        raise ValueError("No feasible IK candidate within joint limits.")
-
-    # return the best configuration
-    return q_best
+    return np.array([q1, q2, q3, q4, q5], dtype=float)

@@ -7,7 +7,7 @@ import numpy as np
 import rclpy
 import cv2
 from cv_bridge import CvBridge
-from kinematics import IK_geometric, IK_solutionfilter
+from kinematics import IK_geometric, FK_dh
 class StateMachine():
     """!
     @brief      This class describes a state machine.
@@ -42,6 +42,10 @@ class StateMachine():
         #changes   
         self.taught_waypoints = []  # List to store taught waypoints
         self.current_gripper_state = 'open'
+        # For click/grab task
+        self.holding_object = False          # True after a successful pick, False after drop
+        self.last_pick_mm = None             # stores last picked [x,y,z] in mm
+
         
 
     def set_next_state(self, state):
@@ -210,172 +214,166 @@ class StateMachine():
 
     def click_to_grab(self):
         """!
-        @brief      Pickup block at mouse clicked position
+        @jbrief Click-to-grab mode: wait for clicks, process each click once. Stays active so you can click repeatedly.
         """
-        print(f"Click to Grab - Waiting for click input...")
+        self.current_state = "click_to_grab"
 
-        # get mouse click position in image coords
+        # Called every 0.05s; if no click yet, just keep waiting
         if not getattr(self.camera, "new_click", False):
+            self.status_message = "State: Click to Grab - Click on a target"
             return
-        
+
+        # Latch click (consume exactly once)
         u = int(self.camera.last_click[0])
         v = int(self.camera.last_click[1])
-        self.camera.new_click = False  # reset click flag
+        self.camera.new_click = False
+        self.status_message = f"State: Click to Grab - Processing ({u}, {v})"
         print(f"Received click at pixel coords: (u={u}, v={v})")
 
-        p_world = self.camera.pixel_to_world(u, v)
+        try:
+            pose_world = self.camera.pixel_to_world(u, v)
+            if pose_world is None:
+                raise ValueError("pixel_to_world returned None")
 
-        x_w, y_w, z_wc = float(p_world[0]), float(p_world[1]), float(p_world[2])
-        
-        #set dummy psi for now
-        psi = 0
+            pose_world = np.asarray(pose_world, dtype=float).reshape(-1)
+            if pose_world.size < 3:
+                raise ValueError(f"pixel_to_world returned shape {pose_world.shape}")
 
-        # set required pose and obtain IK solutions
-        pose_world = [x_w, y_w, z_wc, psi]
-        print(f"Target world pose from click: {pose_world}")
-        params = np.array([[0,1.570796327,103.91,0],
-                       [205.73,0,0,1.3342],
-                       [200,0,0,-1.3342],
-                       [0,1.570796327,0,1.570796327],
-                       [0,0,174.15,0]])
-        IK_sols = IK_geometric(params, pose_world)
-        print(f"IK solutions:\n{IK_sols}")
-        # get current joint angles to filter IK solutions
-        q_curr = self.rxarm.get_positions()
-        print(f"Current joint angles: {q_curr}")
-        IK_res = IK_solutionfilter(IK_sols, q_curr, psi)
-        print(f"Selected IK solution: {IK_res}")
-        # set joint positions to best IK solution
-        if IK_res is not None:
-            self.rxarm.set_positions(IK_res)
-            self.rxarm.gripper.grasp()
+            print(f"Target world pose from click: {pose_world}")
+
+            params = np.array([
+                [0, 1.570796327, 103.91, 0],
+                [205.73, 0, 0, 1.3342],
+                [200, 0, 0, -1.3342],
+                [0, 1.570796327, 0, 1.570796327],
+                [0, 0, 174.15, 0]], dtype=float)
+
+            # IK/FK checker
+            q = IK_geometric(pose_world[:3])
+            q = np.asarray(q, dtype=float).reshape(-1)
+            print(f"IK solution: {q}")
+            T = FK_dh(params, q, link=5)
+            p_fk = np.array([T[0,3], T[1,3], T[2,3]])
+            xyz = pose_world[:3]
+            print("target xyz:", xyz)
+            print("FK xyz:", p_fk)
+            print("pos err (mm):", np.linalg.norm(p_fk - xyz))
+
+            self.rxarm.set_positions(q)
+            self.status_message = "State: Click to Grab - Done. Click again."
+
+        except Exception as e:
+            # Report error but keep click_to_grab alive
+            self.status_message = f"Click to Grab error: {type(e).__name__}: {e}"
+            print(self.status_message)
+
+        # Do NOT change next_state: staying in click_to_grab allows repeated clicks
+        return
+
+
+    def click_to_grab2(self):
+        """
+        First click = PICK, second click = DROP (toggles using self.holding_object)
+
+        Assumptions:
+        - camera.world_cood(u,v) returns [x,y,z] in mm.
+        - IK_geometric expects [x,y,z] in mm.
+        - FK_dh(dh_params, q, link=5) returns mm translation (since dh_params are mm).
+        """
+
+        # decide action based on flag
+        action = "DROP" if getattr(self, "holding_object", False) else "PICK"
+
+        self.current_state = "click_to_grab"
+        if action == "PICK":
+            self.status_message = "Click location in workspace for block pickup"
         else:
-            self.status_message = "No valid IK solution found for clicked point"
+            self.status_message = "Click location in workspace to drop block"
+
+        # read mouse click
+        # Latch click (consume exactly once)
+        u = int(self.camera.last_click[0])
+        v = int(self.camera.last_click[1])
+        p_mm = np.array(self.camera.pixel_to_world(u, v), dtype=float)  # [x,y,z] in mm
+        
+        #-------
+        # IK/FK checker - can delete once working
+        PARAMS = np.array(
+            [
+                [0.0,    1.570796327, 103.91,       0.0],
+                [205.73, 0.0,         0.0,          1.3342],
+                [200.0,  0.0,         0.0,         -1.3342],
+                [0.0,    1.570796327, 0.0,          1.570796327],
+                [0.0,    0.0,         174.15,       0.0],
+            ],
+            dtype=float,
+        )
+
+        print("\n---- Real click target FK/IK check ----")
+        print(f"\n mouse click (u,v)=({u}, {v})")
+        print(f"  action: {action}")
+        print(f"  target pose: {p_mm}")
+
+        q_hat = IK_geometric(p_mm)
+        if q_hat is None:
+            print("  Unreachable")
+            self.next_state = "idle"
+            return
+
+        T_fk = FK_dh(PARAMS, q_hat, link=5)
+        p_hat_mm = T_fk[:3, 3].astype(float)
+
+        err_vec = p_hat_mm - p_mm
+        err = float(np.linalg.norm(err_vec))
+
+        print(f"  IK: {q_hat} ")
+        print(f"  FK: {p_hat_mm} ")
+        print(f"  error: {err_vec} ")
+        print(f"  ||error||: {err:.3f} ")
+
+        # motion function
+        def goto_xyz_mm(xyz_mm, label=""):
+            q = IK_geometric(xyz_mm)
+            if q is None:
+                print(f"Unreachable for {label} xyz_mm={xyz_mm}")
+                return False
+            self.rxarm.set_positions(q)
+            return True
+
+        # motion
+        approach_mm = p_mm.copy()
+        approach_mm[2] += 75.0  # 75 mm above - change accordingly
+        descend_mm = p_mm.copy()
+        # safer default: don't go below table unless you intentionally want it
+        descend_mm[2] = p_mm[2]
+        if not goto_xyz_mm(approach_mm, label="approach(+75mm)"):
+            self.next_state = "idle"
+            return
+        time.sleep(1.2)
+
+        if not goto_xyz_mm(descend_mm, label="descend"):
+            self.next_state = "idle"
+            return
+        time.sleep(1.2)
+
+        if action == "PICK":
+            self.rxarm.gripper.grasp()
+            time.sleep(0.8)
+            self.holding_object = True
+            self.last_pick_mm = p_mm.copy()
+            self.status_message = "Picked. Click a drop location."
+        else:
+            self.rxarm.gripper.release()
+            time.sleep(0.8)
+            self.holding_object = False
+            self.last_pick_mm = None
+            self.status_message = "Dropped. Click a pickup location."
+
+        goto_xyz_mm(approach_mm, label="retreat(+75mm)")
+        time.sleep(1.2)
+
         self.next_state = "idle"
 
-    # def calibrate(self):
-    #     self.current_state = "calibrate"
-    #     self.status_message = "Calibration - Running"
-
-    #     # map known tag ids -> world coordinates (same units as you will use downstream)
-    #     world_map = {
-    #         1: [-250.0, -25.0, 0.0],
-    #         2: [250.0, -25.0, 0.0],
-    #         3: [250.0, 275.0, 0.0],
-    #         4: [-250.0, 275.0, 0.0],
-    #     }
-
-    #     detections_msg = getattr(self.camera, "tag_detections", None)
-    #     if not detections_msg or not getattr(detections_msg, "detections", None):
-    #         self.status_message = "Calibration failed: no tag detections"
-    #         return
-
-    #     obj_pts = []
-    #     img_pts = []
-
-    #     for det in detections_msg.detections:
-    #         tag_id = getattr(det, "id", None) or getattr(det, "tag_id", None)
-    #         if tag_id is None:
-    #             continue
-
-    #         centre = getattr(det, "centre", None) or getattr(det, "center", None)
-    #         if centre is None:
-    #             continue
-
-    #         cx = getattr(centre, "x", None) or getattr(centre, "u", None)
-    #         cy = getattr(centre, "y", None) or getattr(centre, "v", None)
-    #         if cx is None or cy is None:
-    #             continue
-
-    #         if int(tag_id) in world_map:
-    #             obj_pts.append(world_map[int(tag_id)])
-    #             img_pts.append([float(cx), float(cy)])
-
-    #     if len(obj_pts) < 4:
-    #         self.status_message = f"Calibration failed: need >=4 correspondences, got {len(obj_pts)}"
-    #         return
-
-    #     k = getattr(self.camera, "intrinsic_matrix", None)
-    #     d = getattr(self.camera, "distortion", None)
-    #     if k is None:
-    #         self.status_message = "Calibration failed: missing camera intrinsics"
-    #         return
-
-    #     obj_pts_np = np.asarray(obj_pts, dtype=np.float64)
-    #     img_pts_np = np.asarray(img_pts, dtype=np.float64)
-    #     cam_mtx = np.asarray(k, dtype=np.float64)
-    #     dist_coef = None if d is None else np.asarray(d, dtype=np.float64)
-
-    #     # Debug print of inputs (comment out later)
-    #     print("Calibration inputs: obj_pts shape", obj_pts_np.shape, "img_pts shape", img_pts_np.shape)
-    #     print("Camera matrix:\n", cam_mtx)
-    #     if dist_coef is not None:
-    #         print("Distortion coeffs:", dist_coef)
-
-    #     try:
-    #         ret, rvec, tvec = cv2.solvePnP(obj_pts_np, img_pts_np, cam_mtx, dist_coef)
-    #     except Exception as e:
-    #         self.status_message = f"Calibration error: {e}"
-    #         return
-
-    #     if not ret:
-    #         self.status_message = "Calibration failed: solvePnP returned False"
-    #         return
-
-    #     R, _ = cv2.Rodrigues(rvec)
-    #     extrinsic = np.eye(4, dtype=np.float64)
-    #     extrinsic[:3, :3] = R
-    #     extrinsic[:3, 3] = tvec.flatten()
-
-    #     self.camera.extrinsic_matrix = extrinsic
-    #     print("Extrinsic matrix:\n", extrinsic)
-
-    #     self.status_message = "Calibration - Completed Calibration"
-    #     self.next_state = "idle"
-    #     time.sleep(1)
-
-    # def calibrate(self):
-    #     """!
-    #     @brief      Gets the user input to perform the calibration
-    #     """
-    #     self.current_state = "calibrate"
-              
-    #     """TODO Perform camera calibration routine here"""
-    #     world_points = np.array([[-250,-25,0],
-    #                              [250,-25,0],
-    #                              [250,275,0],
-    #                              [-250,275,0]
-    #                              ])
-    #     image_points = np.zeros((4,2))
-    #     for detection in self.camera.tag_detections.detections:            
-    #         center_x = int(detection.centre.x)
-    #         center_y = int(detection.centre.y)
-    #         tag_id = detection.id            
-    #         image_points[tag_id-1,:] = np.array([center_x, center_y])        
-        
-    #     k = self.camera.intrinsic_matrix
-    #     d = self.camera.distortion        
-    #     [_, R_exp, t] = cv2.solvePnP(world_points,
-    #                                 image_points,
-    #                                 k,
-    #                                 d,
-    #                                 flags=cv2.SOLVEPNP_ITERATIVE)
-    #     R, _ = cv2.Rodrigues(R_exp)  
-    #     print(f"Rotation Matrix:\n{R}\nTranslation Vector:\n{t}")      
-    #     extrinsic = np.zeros((4,4))
-    #     # print(f"EXTRINSIC INITIAL:\n{extrinsic}")
-    #     extrinsic[:3,:3] = R
-    #     extrinsic[:-1,3] = t.flatten()
-    #     extrinsic[-1,-1] = 1        
-        
-        
-    #     self.camera.extrinsic_matrix = extrinsic
-    #     # print(f"Extrinsic matrix:{self.camera.extrinsic_matrix}")
-        
-    #     self.status_message = "Calibration - Completed Calibration"
-    #     self.next_state = "idle"  
-    #     time.sleep(5)
-    
     def calibrate(self):
         """
         Perform camera extrinsic calibration using AprilTag detections
