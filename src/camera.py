@@ -62,8 +62,8 @@ class Camera():
         self.tag_detections = None
         self.tag_locations = [[-250, -25], [250, -25], [250, 275], [-250, 275]]
         """ block info """
-        self.block_contours = np.array([])
-        self.block_detections = np.array([])
+        # self.block_contours = np.array([])
+        self.block_detections = None
 
         self.H = np.eye(3)
         self.hasHcalculate = False
@@ -79,7 +79,7 @@ class Camera():
         if not hasattr(self,'VideoFrameWarped') or self.VideoFrameWarped is None:
             return
         out = self.VideoFrameWarped.copy()
-        cv2.drawContours(out, self.block_contours, -1,(255, 0, 255), 3)
+        # cv2.drawContours(out, self.block_contours, -1,(255, 0, 255), 3)
         self.VideoFrameWarpedDrawn = out
 
     def ColorizeDepthFrame(self):
@@ -272,6 +272,114 @@ class Camera():
         return best_color
 
 
+
+
+    def segment_blocks_watershed(self, rgb_bd):
+        """
+        Input: rgb_bd (RGB uint8) already warped to board view.
+        Output:
+        - annotated_rgb (RGB)
+        - blocks: list of dicts with contour/center/angle/color/area
+        """
+        lower_dict = {
+            'red': (170, 180, 90),
+            'orange': (0, 180, 0),
+            'yellow': (20, 150, 130),
+            'green': (45, 70, 60),
+            'blue': (100, 130, 40),
+            'purple': (110, 70, 0)
+        }
+        upper_dict = {
+            'red': (179, 255, 255),
+            'orange': (15, 255, 255),
+            'yellow': (25, 255, 255),
+            'green': (90, 255, 255),
+            'blue': (110, 255, 255),
+            'purple': (140, 255, 255)
+        }
+
+        color_boundary = {
+        'red': (255, 0, 0),
+        'orange': (255, 125, 0),
+        'yellow': (255, 255, 0),
+        'green': (0, 255, 0),
+        'blue':(0, 0, 255),
+        'purple': (125, 0, 50)
+        }
+
+        annotated = rgb_bd.copy()
+        hsv = cv2.cvtColor(rgb_bd, cv2.COLOR_RGB2HSV)
+
+        h, w = hsv.shape[:2]
+
+        # workspace mask (keep your table ROI logic)
+        workspace_mask = np.zeros((h, w), dtype=np.uint8)
+        cv2.rectangle(workspace_mask, (225, 0), (1170, 670), 255, cv2.FILLED)
+        cv2.rectangle(workspace_mask, (620, 340), (820, 670), 0, cv2.FILLED)
+
+        blocks = []
+        kernel = np.ones((3, 3), np.uint8)
+
+        for c in lower_dict.keys():
+            lower = np.array(lower_dict[c], dtype=np.uint8)
+            upper = np.array(upper_dict[c], dtype=np.uint8)
+
+            mask = cv2.inRange(hsv, lower, upper)
+            mask = cv2.bitwise_and(mask, workspace_mask)
+
+            opening = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=2)
+
+            # contours on cleaned mask (simple & stable)
+            contours, _ = cv2.findContours(opening, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+
+            for contour in contours:
+                area = cv2.contourArea(contour)
+                if area < 400 or area > 3000:
+                    continue
+
+                pts = np.squeeze(contour, axis=1)
+                if pts.ndim != 2 or pts.shape[0] < 3:
+                    continue
+
+                hull = cv2.convexHull(pts.astype(np.int32))
+
+                rect = cv2.minAreaRect(hull)
+                (cx, cy), (rw, rh), angle = rect
+
+                if rw < 1 or rh < 1:
+                    continue
+
+                aspect = max(rw, rh) / min(rw, rh)
+                if aspect > 3:
+                    continue
+
+                rect_area = rw * rh
+                if rect_area < 50 or rect_area > 3000:
+                    continue
+
+                # angle normalize (same as your current code style)
+                if rw < rh:
+                    angle = (90 + angle) % 180
+                else:
+                    angle = angle % 180
+                cx_i, cy_i = int(cx), int(cy)
+
+                cv2.drawContours(annotated, [hull], -1, color_boundary[c], 2)
+                cv2.circle(annotated, (cx_i, cy_i), 3, (0, 0, 0), -1)
+                cv2.putText(annotated, f"{c}", (cx_i - 20, cy_i - 12),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
+
+                blocks.append({
+                    "color": c,
+                    "center_px": (cx_i, cy_i),
+                    "angle_deg": float(angle),
+                    "rect_area": float(rect_area),
+                    "contour": hull,
+                    "area": float(area),
+                })
+
+        return annotated, blocks
+
     def blockDetector(self):
         """!
         @brief      Hybrid Detector: Finds blocks using RGB (masked to table area) 
@@ -283,111 +391,112 @@ class Camera():
         # 1. Prepare RGB Image (Warping)
         h, w = self.VideoFrame.shape[:2]
         rgb_bd = cv2.warpPerspective(self.VideoFrame, self.H, (w, h))
-        hsv_bd = cv2.cvtColor(rgb_bd, cv2.COLOR_BGR2HSV)
+        annotated, blocks = self.segment_blocks_watershed(rgb_bd)
+        # hsv_bd = cv2.cvtColor(rgb_bd, cv2.COLOR_BGR2HSV)
         
-        # --- 2. Create Workspace Mask (Same logic as depth function) ---
-        workspace_mask = np.zeros((h, w), dtype=np.uint8)
-        # Outer bounds (Table) - White
-        cv2.rectangle(workspace_mask, (225, 0), (1170, 670), 255, cv2.FILLED)
-        # Inner "hole" (Robot Base) - Black
-        cv2.rectangle(workspace_mask, (620, 340), (820, 670), 0, cv2.FILLED)
+        # # --- 2. Create Workspace Mask (Same logic as depth function) ---
+        # workspace_mask = np.zeros((h, w), dtype=np.uint8)
+        # # Outer bounds (Table) - White
+        # cv2.rectangle(workspace_mask, (225, 0), (1170, 670), 255, cv2.FILLED)
+        # # Inner "hole" (Robot Base) - Black
+        # cv2.rectangle(workspace_mask, (620, 340), (820, 670), 0, cv2.FILLED)
 
-        # Define Color Ranges
-        HSV_RANGES = {
-            "red_low":   (np.array([0, 100, 80]),   np.array([10, 255, 255])),
-            "red_high":  (np.array([170, 100, 80]), np.array([180, 255, 255])),
-            "orange":    (np.array([10, 100, 80]),  np.array([22, 255, 255])),
-            "yellow":    (np.array([22, 100, 80]),  np.array([35, 255, 255])),
-            "green":     (np.array([35, 100, 80]),  np.array([85, 255, 255])),
-            "blue":      (np.array([85, 100, 80]),  np.array([130, 255, 255])),
-            "purple":    (np.array([130, 100, 80]), np.array([170, 255, 255]))
-        }
+        # # Define Color Ranges
+        # HSV_RANGES = {
+        #     "red_low":   (np.array([0, 100, 80]),   np.array([10, 255, 255])),
+        #     "red_high":  (np.array([170, 100, 80]), np.array([180, 255, 255])),
+        #     "orange":    (np.array([10, 100, 80]),  np.array([22, 255, 255])),
+        #     "yellow":    (np.array([22, 100, 80]),  np.array([35, 255, 255])),
+        #     "green":     (np.array([35, 100, 80]),  np.array([85, 255, 255])),
+        #     "blue":      (np.array([85, 100, 80]),  np.array([130, 255, 255])),
+        #     "purple":    (np.array([130, 100, 80]), np.array([170, 255, 255]))
+        # }
 
-        block_rows = []
-        contours_out = []
-        detected_centers = []
+        # block_rows = []
+        # contours_out = []
+        # detected_centers = []
 
-        # 3. Iterate through colors
-        for color_name, (lower, upper) in HSV_RANGES.items():
+        # # 3. Iterate through colors
+        # for color_name, (lower, upper) in HSV_RANGES.items():
             
-            # A. Find Color
-            color_mask = cv2.inRange(hsv_bd, lower, upper)
+        #     # A. Find Color
+        #     color_mask = cv2.inRange(hsv_bd, lower, upper)
             
-            # B. Apply Workspace Mask (Only keep color inside valid table area)
-            mask = cv2.bitwise_and(color_mask, workspace_mask)
+        #     # B. Apply Workspace Mask (Only keep color inside valid table area)
+        #     mask = cv2.bitwise_and(color_mask, workspace_mask)
             
-            # Morphological Cleanup
-            kernel = np.ones((3,3), np.uint8)
-            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        #     # Morphological Cleanup
+        #     kernel = np.ones((3,3), np.uint8)
+        #     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        #     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
 
-            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        #     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-            for contour in contours:
-                # --- C. GEOMETRY FILTER ---
-                rect = cv2.minAreaRect(contour)
-                (center_x, center_y), (width, height), angle = rect
+        #     for contour in contours:
+        #         # --- C. GEOMETRY FILTER ---
+        #         rect = cv2.minAreaRect(contour)
+        #         (center_x, center_y), (width, height), angle = rect
                 
-                if width < 1 or height < 1: continue
+        #         if width < 1 or height < 1: continue
                 
-                aspect_ratio = max(width, height) / min(width, height)
-                if aspect_ratio > 3: continue 
+        #         aspect_ratio = max(width, height) / min(width, height)
+        #         if aspect_ratio > 3: continue 
                 
-                rect_area = width * height
-                if rect_area < 50 or rect_area > 3000: continue
+        #         rect_area = width * height
+        #         if rect_area < 50 or rect_area > 3000: continue
 
-                # --- D. DEPTH VERIFICATION ---
-                cX, cY = int(center_x), int(center_y)
+        #         # --- D. DEPTH VERIFICATION ---
+        #         cX, cY = int(center_x), int(center_y)
                 
-                # Bounds check
-                if cY >= self.WorldHeightMap.shape[0] or cX >= self.WorldHeightMap.shape[1]:
-                    continue
+        #         # Bounds check
+        #         if cY >= self.WorldHeightMap.shape[0] or cX >= self.WorldHeightMap.shape[1]:
+        #             continue
                     
-                z_val = self.WorldHeightMap[cY, cX]
+        #         z_val = self.WorldHeightMap[cY, cX]
 
-                # Threshold: Block must have real physical height (ignore flat stickers)
-                if z_val < 5:
-                    continue
+        #         # Threshold: Block must have real physical height (ignore flat stickers)
+        #         if z_val < 5:
+        #             continue
 
-                # --- E. DUPLICATE CHECK ---
-                is_duplicate = False
-                for existing_c in detected_centers:
-                    dist = np.sqrt((cX - existing_c[0])**2 + (cY - existing_c[1])**2)
-                    if dist < 10: 
-                        is_duplicate = True
-                        break
-                if is_duplicate:
-                    continue
+        #         # --- E. DUPLICATE CHECK ---
+        #         is_duplicate = False
+        #         for existing_c in detected_centers:
+        #             dist = np.sqrt((cX - existing_c[0])**2 + (cY - existing_c[1])**2)
+        #             if dist < 10: 
+        #                 is_duplicate = True
+        #                 break
+        #         if is_duplicate:
+        #             continue
                 
-                # --- F. COLOR CLASSIFICATION (MODIFIED) ---
-                # We use your function to confirm the color, instead of trusting the HSV loop variable
-                detected_color = self.classifyBlockColorBoard(rgb_bd, contour)
+        #         # --- F. COLOR CLASSIFICATION (MODIFIED) ---
+        #         # We use your function to confirm the color, instead of trusting the HSV loop variable
+        #         detected_color = self.classifyBlockColorBoard(rgb_bd, contour)
 
-                if detected_color == "unknown":
-                    continue
+        #         if detected_color == "unknown":
+        #             continue
 
-                detected_centers.append((cX, cY))
+        #         detected_centers.append((cX, cY))
                 
-                # Draw
-                cv2.drawContours(rgb_bd, [contour], -1, (0, 0, 0), 2)
-                cv2.circle(rgb_bd, (cX, cY), 3, (0, 0, 255), -1)
-                cv2.putText(rgb_bd, f"{detected_color} {int(z_val)}mm", (cX-30, cY-20), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,0), 2)
+        #         # Draw
+        #         cv2.drawContours(rgb_bd, [contour], -1, (0, 0, 0), 2)
+        #         cv2.circle(rgb_bd, (cX, cY), 3, (0, 0, 255), -1)
+        #         cv2.putText(rgb_bd, f"{detected_color} {int(z_val)}mm", (cX-30, cY-20), 
+        #                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,0), 2)
 
-                # Angle Correction
-                if width < height:
-                    angle = (90 + angle) % 180
-                else:
-                    angle = angle % 180
+        #         # Angle Correction
+        #         if width < height:
+        #             angle = (90 + angle) % 180
+        #         else:
+        #             angle = angle % 180
                 
-                world = self.pixel_to_world(cX, cY)
+        #         world = self.pixel_to_world(cX, cY)
                 
-                block_rows.append((detected_color, world[0], world[1], z_val, angle, rect_area))
-                contours_out.append(contour)
+        #         block_rows.append((detected_color, world[0], world[1], z_val, angle, rect_area))
+        #         contours_out.append(contour)
 
-        self.block_contours = contours_out
-        self.block_detections = np.array(block_rows, dtype=object)
-        self.VideoFrameWarped = rgb_bd
+        # self.block_contours = contours_out
+        self.block_detections = blocks
+        self.VideoFrameWarped = annotated
 
     def detectBlocksInDepthImage(self):
         """!

@@ -45,6 +45,9 @@ class StateMachine():
         # For click/grab task
         self.holding_object = False          # True after a successful pick, False after drop
         self.last_pick_mm = None             # stores last picked [x,y,z] in mm
+        self.z_grab_threshold = 15
+        self.gripper_opened = True
+        self.drop_height = None
 
         
 
@@ -239,6 +242,7 @@ class StateMachine():
             if pose_world.size < 3:
                 raise ValueError(f"pixel_to_world returned shape {pose_world.shape}")
 
+            pose_world[2] += self.z_grab_threshold  # Adjust Z for grasping height 
             print(f"Target world pose from click: {pose_world}")
 
             params = np.array([
@@ -259,8 +263,87 @@ class StateMachine():
             print("FK xyz:", p_fk)
             print("pos err (mm):", np.linalg.norm(p_fk - xyz))
 
-            self.rxarm.set_positions(q)
-            self.status_message = "State: Click to Grab - Done. Click again."
+        
+            # 1) Move to approach position (with z offset applied above)
+     
+            if self.current_gripper_state == 'open':
+                # PICK: descend to surface, grasp, retreat
+
+                params = np.array([
+                    [0, 1.570796327, 103.91, 0],
+                    [205.73, 0, 0, 1.3342],
+                    [200, 0, 0, -1.3342],
+                    [0, 1.570796327, 0, 1.570796327],
+                    [0, 0, 174.15, 0]], dtype=float)
+                T_target = FK_dh(params, q, link=5)
+                T_target[2,3] += self.z_grab_threshold
+                q = IK_geometric(T_target[:3,3])
+                self.rxarm.set_positions(q)
+
+                time.sleep(3.0)
+                pose_world[2] -= (self.z_grab_threshold + 10)  # descend to just above surface
+                q_descend = IK_geometric(pose_world[:3])
+                q_descend = np.asarray(q_descend, dtype=float).reshape(-1)
+                self.rxarm.set_positions(q_descend)
+                time.sleep(3.0)
+                self.rxarm.gripper.grasp()
+                self.current_gripper_state = 'closed'
+                time.sleep(0.5)
+
+
+
+
+                # pose_world[2] += self.z_grab_threshold
+                # q_descend = IK_geometric(pose_world[:3])
+                # q_descend = np.asarray(q_descend, dtype=float).reshape(-1)
+                # self.rxarm.set_positions(q_descend)
+                # time.sleep(1.0)
+
+
+                pose_world[2] += self.z_grab_threshold + 40
+                self.drop_height = pose_world[2]
+
+                q_retreat = IK_geometric(pose_world[:3])
+                q_retreat = np.asarray(q_retreat, dtype=float).reshape(-1)
+                self.rxarm.set_positions(q_retreat)
+                time.sleep(1.0)
+
+                self.status_message = "State: Click to Grab - Picked. Click drop location."
+
+            else:
+                # DROP: already at offset height, just release
+                # print(drop_height)
+
+                params = np.array([
+                    [0, 1.570796327, 103.91, 0],
+                    [205.73, 0, 0, 1.3342],
+                    [200, 0, 0, -1.3342],
+                    [0, 1.570796327, 0, 1.570796327],
+                    [0, 0, 174.15, 0]], dtype=float)
+                T_target = FK_dh(params, q, link=5)
+                T_target[2,3] = self.drop_height
+                q_drop = IK_geometric(T_target[:3,3])
+                q_drop = np.asarray(q_drop, dtype=float).reshape(-1)
+
+                self.rxarm.set_positions(q_drop)
+                time.sleep(2.0)
+                pose_world[2] += 20
+                q_descend = IK_geometric(pose_world[:3])
+                q_descend = np.asarray(q_descend, dtype=float).reshape(-1)
+                self.rxarm.set_positions(q_descend)
+                time.sleep(2.0)
+
+
+
+
+                # pose_world[2] = self.drop_height+10 
+                # q_drop = IK_geometric(pose_world[:3])
+                # q_drop = np.asarray(q_drop, dtype=float).reshape(-1)
+                # self.rxarm.set_positions(q_drop)
+                self.rxarm.gripper.release()
+                self.current_gripper_state = 'open'
+                time.sleep(0.5)
+                self.status_message = "State: Click to Grab - Dropped. Click pickup location."
 
         except Exception as e:
             # Report error but keep click_to_grab alive

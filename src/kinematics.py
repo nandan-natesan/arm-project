@@ -379,8 +379,12 @@ def IK_geometric(pose):
 
     #wrist pitch and roll / theta4, theta5
     theta4 = np.pi/2 - psi - theta2 - theta3
-    theta5 = 0.0
-    #should implement theta5 off theta1
+    theta5 = 0.0 
+
+    #if 0 < theta1 < np.pi / 2:
+    #   theta5 = np.pi/2 - theta1
+    #if np.pi / 2 < theta1 < np.pi:
+    #   theta5 = np.pi/ 2 - np.pi - theta1
 
     # Convert geometric to motor angles
     q1 = theta1
