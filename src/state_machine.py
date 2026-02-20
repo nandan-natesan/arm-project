@@ -7,7 +7,7 @@ import numpy as np
 import rclpy
 import cv2
 from cv_bridge import CvBridge
-from kinematics import IK_geometric, FK_dh
+from kinematics import IK_geometric, FK_dh, compute_wrist_roll
 class StateMachine():
     """!
     @brief      This class describes a state machine.
@@ -99,6 +99,16 @@ class StateMachine():
 
         if self.next_state == "click_to_grab":
             self.click_to_grab()
+        
+        if self.next_state == "test_wrist_align":
+            self.test_wrist_align()
+
+        if self.next_state == "auto_sort_stack_l1":
+            self.auto_sort_stack_l1()
+        if self.next_state == "auto_sort_stack_l2":
+            self.auto_sort_stack_l2()
+        if self.next_state == "auto_sort_stack_l3":
+            self.auto_sort_stack_l3()
         
 
     """Functions run for each state"""
@@ -352,6 +362,151 @@ class StateMachine():
 
         # Do NOT change next_state: staying in click_to_grab allows repeated clicks
         return
+
+
+
+
+    def test_wrist_align(self):
+        self.current_state = "test_wrist_align"
+
+        # ---- PHASE 1: AUTO-DETECT BLOCK ----
+        if self.camera.block_detections is None or len(self.camera.block_detections) == 0:
+            self.status_message = "No blocks detected"
+            self.next_state = "idle"
+            return
+
+        block = self.camera.block_detections[0]
+        u, v = block["center_px"]
+        block_angle_deg = block["angle_deg"]
+        self.status_message = f"Picking {block['color']} block at {block_angle_deg:.0f}°"
+        print(f"\n[AUTO PICK] ===== PICK PHASE =====")
+        print(f"[AUTO PICK] Block: color={block['color']}, px=({u},{v}), angle={block_angle_deg:.1f}°")
+
+        try:
+            pose_world = np.asarray(self.camera.pixel_to_world(u, v), dtype=float)
+            print(f"[AUTO PICK] World XYZ: x={pose_world[0]:.1f}, y={pose_world[1]:.1f}, z={pose_world[2]:.1f}")
+
+            self.rxarm.gripper.release()
+            time.sleep(0.3)
+
+            # 2a) Approach: +z_grab_threshold on top of initial +z_grab_threshold (same as click_to_grab)
+            pose_world[2] += self.z_grab_threshold
+            approach = pose_world.copy()
+            approach[2] += self.z_grab_threshold
+            q_app = IK_geometric(approach[:3], block_angle_deg)
+            if q_app is None:
+                self.status_message = "IK unreachable (approach)"
+                self.next_state = "idle"
+                return
+            q_app = np.asarray(q_app, dtype=float)
+            #q_app[4] = compute_wrist_roll(q_app[0], block_angle_deg)
+            print(f"[AUTO PICK] Approach Z={approach[2]:.1f}")
+            self.rxarm.set_positions(q_app)
+            time.sleep(3.0)
+
+            # 2b) Descend: -(z_grab_threshold + 10) from current pose_world
+            descend = pose_world.copy()
+            descend[2] -= (self.z_grab_threshold + 10)
+            q_desc = IK_geometric(descend[:3], block_angle_deg)
+            if q_desc is None:
+                self.status_message = "IK unreachable (descend)"
+                self.next_state = "idle"
+                return
+            q_desc = np.asarray(q_desc, dtype=float)
+            #q_desc[4] = compute_wrist_roll(q_desc[0], block_angle_deg)
+            print(f"[AUTO PICK] Descend Z={descend[2]:.1f}")
+            self.rxarm.set_positions(q_desc)
+            time.sleep(3.0)
+
+            # 2c) Grasp
+            self.rxarm.gripper.grasp()
+            time.sleep(0.5)
+            print(f"[AUTO PICK] Grasped!")
+
+            # 2d) Retreat: +(z_grab_threshold + 40) from descend
+            retreat = descend.copy()
+            retreat[2] += self.z_grab_threshold + 40
+            drop_height = retreat[2]
+            q_ret = IK_geometric(retreat[:3], block_angle_deg)
+            if q_ret is None:
+                self.status_message = "IK unreachable (retreat)"
+                self.next_state = "idle"
+                return
+            q_ret = np.asarray(q_ret, dtype=float)
+            #q_ret[4] = compute_wrist_roll(q_ret[0], block_angle_deg)
+            print(f"[AUTO PICK] Retreat Z={retreat[2]:.1f}")
+            self.rxarm.set_positions(q_ret)
+            time.sleep(1.0)
+
+            # ---- PHASE 3: WAIT FOR DROP CLICK ----
+            self.status_message = "Block picked! Click drop location."
+            self.camera.new_click = False
+            print(f"[AUTO PICK] Waiting for drop click...")
+
+            while not self.camera.new_click:
+                if self.next_state == "estop":
+                    return
+                time.sleep(0.05)
+
+            drop_u = int(self.camera.last_click[0])
+            drop_v = int(self.camera.last_click[1])
+            self.camera.new_click = False
+
+            print(f"\n[AUTO PLACE] ===== PLACE PHASE =====")
+            print(f"[AUTO PLACE] Click pixel: ({drop_u}, {drop_v})")
+
+            drop_world = np.asarray(self.camera.pixel_to_world(drop_u, drop_v), dtype=float)
+            print(f"[AUTO PLACE] Drop XYZ: x={drop_world[0]:.1f}, y={drop_world[1]:.1f}, z={drop_world[2]:.1f}")
+
+            PLACE_ANGLE = 90.0
+
+            # 4a) Approach at drop_height
+            drop_app = drop_world.copy()
+            drop_app[2] = drop_height
+            q_dapp = IK_geometric(drop_app[:3], PLACE_ANGLE)
+            if q_dapp is None:
+                self.status_message = "IK unreachable (drop approach)"
+                self.next_state = "idle"
+                return
+            q_dapp = np.asarray(q_dapp, dtype=float)
+            #q_dapp[4] = compute_wrist_roll(q_dapp[0], PLACE_ANGLE)
+            print(f"[AUTO PLACE] Drop approach Z={drop_app[2]:.1f}")
+            self.rxarm.set_positions(q_dapp)
+            time.sleep(2.0)
+
+            # 4b) Descend: +20 above clicked point
+            drop_desc = drop_world.copy()
+            drop_desc[2] += 20
+            q_ddesc = IK_geometric(drop_desc[:3], PLACE_ANGLE)
+            if q_ddesc is None:
+                self.status_message = "IK unreachable (drop descend)"
+                self.next_state = "idle"
+                return
+            q_ddesc = np.asarray(q_ddesc, dtype=float)
+            #q_ddesc[4] = compute_wrist_roll(q_ddesc[0], PLACE_ANGLE)
+            print(f"[AUTO PLACE] Drop descend Z={drop_desc[2]:.1f}")
+            self.rxarm.set_positions(q_ddesc)
+            time.sleep(2.0)
+
+            # 4c) Release
+            self.rxarm.gripper.release()
+            time.sleep(0.5)
+            print(f"[AUTO PLACE] Released!")
+
+            # 4d) Retreat
+            self.rxarm.set_positions(q_dapp)
+            time.sleep(1.0)
+
+            self.status_message = "Pick & place done!"
+            print(f"[AUTO PLACE] Complete!")
+
+        except Exception as e:
+            self.status_message = f"Auto pick/place error: {e}"
+            print(f"[AUTO] Error: {e}")
+            import traceback
+            traceback.print_exc()
+
+        self.next_state = "idle"
 
 
     def click_to_grab2(self):

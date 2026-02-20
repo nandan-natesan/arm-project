@@ -142,41 +142,28 @@ class Camera():
         except:
             return None
 
+
     def convertQtDepthFrame(self):
         """!
-       @brief      Converts colormaped depth frame to format suitable for Qt
-
-       @return     QImage
-       """
-        try:
-            img = QImage(self.DepthFrameRGB, self.DepthFrameRGB.shape[1],
-                         self.DepthFrameRGB.shape[0], QImage.Format_RGB888)
-            return img
-        except:
+        @brief      Returns the QImage for the GUI. 
+                    Switches between Original and Warped based on state.
+        """
+        if self.DepthFrameRaw is None:
             return None
 
+        # Decide which image to show
+        if self.hasHcalculate and hasattr(self, 'DepthFrameWarpedRGB'):
+            display_frame = self.DepthFrameWarpedRGB
+        else:
+            display_frame = self.DepthFrameRGB
 
-    def convertQtDepthFrame(self):
-            """!
-            @brief      Returns the QImage for the GUI. 
-                        Switches between Original and Warped based on state.
-            """
-            if self.DepthFrameRaw is None:
-                return None
+        if display_frame is None:
+            return None
 
-            # Decide which image to show
-            if self.hasHcalculate and hasattr(self, 'DepthFrameWarpedRGB'):
-                display_frame = self.DepthFrameWarpedRGB
-            else:
-                display_frame = self.DepthFrameRGB
-
-            if display_frame is None:
-                return None
-
-            # Convert to QImage
-            height, width, channel = display_frame.shape
-            bytes_per_line = 3 * width
-            return QImage(display_frame.data, width, height, bytes_per_line, QImage.Format_RGB888)
+        # Convert to QImage
+        height, width, channel = display_frame.shape
+        bytes_per_line = 3 * width
+        return QImage(display_frame.data, width, height, bytes_per_line, QImage.Format_RGB888)
 
 
     def convertQtTagImageFrame(self):
@@ -350,7 +337,7 @@ class Camera():
                     continue
 
                 aspect = max(rw, rh) / min(rw, rh)
-                if aspect > 3:
+                if aspect > 1.32:
                     continue
 
                 rect_area = rw * rh
@@ -358,10 +345,11 @@ class Camera():
                     continue
 
                 # angle normalize (same as your current code style)
-                if rw < rh:
-                    angle = (90 + angle) % 180
-                else:
-                    angle = angle % 180
+                # if rw < rh:
+                #     angle = (90 + angle) % 180
+                # else:
+         
+                # print("check!!!!",angle)
                 cx_i, cy_i = int(cx), int(cy)
 
                 cv2.drawContours(annotated, [hull], -1, color_boundary[c], 2)
@@ -497,6 +485,135 @@ class Camera():
         # self.block_contours = contours_out
         self.block_detections = blocks
         self.VideoFrameWarped = annotated
+    
+    
+    # def classify_color_watershed_part(self, rgb_bd, contour):
+    #     """
+    #     Alternative color classification using HSV thresholds and pixel voting.
+    #     """
+    #     lower_dict = {
+    #         'red':    (170, 180, 90),
+    #         'orange': (0,   180, 0),
+    #         'yellow': (20,  150, 130),
+    #         'green':  (45,  70,  60),
+    #         'blue':   (100, 130, 40),
+    #         'purple': (110, 70,  0)
+    #     }
+    #     upper_dict = {
+    #         'red':    (179, 255, 255),
+    #         'orange': (15,  255, 255),
+    #         'yellow': (25,  255, 255),
+    #         'green':  (90,  255, 255),
+    #         'blue':   (110, 255, 255),
+    #         'purple': (140, 255, 255)
+    #     }
+
+    #     hsv = cv2.cvtColor(rgb_bd, cv2.COLOR_RGB2HSV)
+
+    #     # 1) contour mask
+    #     region = np.zeros(hsv.shape[:2], dtype=np.uint8)
+    #     cv2.drawContours(region, [contour], -1, 255, thickness=-1)
+
+    #     # 2) filter out low saturation/value pixels
+    #     s = hsv[..., 1]
+    #     v = hsv[..., 2]
+    #     valid = (s > 50) & (v > 40)
+    #     region_valid = (region == 255) & valid
+
+    #     total = int(np.sum(region_valid))
+    #     if total < 40:
+    #         return "unknown", 0.0
+
+
+    #     scores = {}
+    #     for c in lower_dict.keys():
+    #         lower = np.array(lower_dict[c], dtype=np.uint8)
+    #         upper = np.array(upper_dict[c], dtype=np.uint8)
+    #         mask_c = cv2.inRange(hsv, lower, upper)
+    #         scores[c] = int(np.sum(mask_c[region_valid] > 0))
+
+    #     best = max(scores, key=scores.get)
+    #     ratio = scores[best] / float(total)
+
+    #     if ratio < 0.18:
+    #         return "unknown", ratio
+
+    #     return best, ratio
+
+
+
+    # def blockDetector(self):
+    #     """
+    #     @brief      Hybrid Detector: Finds blocks using RGB (masked to table area) 
+    #                 and verifies them using Depth.
+    #     """
+    #     if self.VideoFrame is None or self.WorldHeightMap is None or (not self.hasHcalculate):
+    #         self.block_detections = []
+    #         return
+
+  
+    #     h, w = self.VideoFrame.shape[:2]
+    #     rgb_bd = cv2.warpPerspective(self.VideoFrame, self.H, (w, h))
+
+    #     # 2) depth candidates（
+    #     candidates = self.detectBlocksInDepthImage()
+    #     if candidates is None:
+    #         candidates = []
+
+        
+    #     color_boundary = {
+    #         'red': (255, 0, 0),
+    #         'orange': (255, 125, 0),
+    #         'yellow': (255, 255, 0),
+    #         'green': (0, 255, 0),
+    #         'blue': (0, 0, 255),
+    #         'purple': (125, 0, 50),
+    #         'unknown': (200, 200, 200)
+    #     }
+
+    #     annotated = rgb_bd.copy()
+    #     blocks = []
+
+    #     for cand in candidates:
+    #         contour = cand["contour"]
+    #         cx, cy = cand["center"]   
+
+          
+    #         z_top = float(self.WorldHeightMap[cy, cx]) if (0 <= cy < self.WorldHeightMap.shape[0] and 0 <= cx < self.WorldHeightMap.shape[1]) else -1.0
+
+           
+    #         color, ratio = self.classify_color_watershed_part(rgb_bd, contour)
+    #         if color == "unknown":
+    #             continue
+
+    #         draw_color = color_boundary.get(color, (255, 255, 255))
+    #         hull = cv2.convexHull(contour)  
+    #         cv2.drawContours(annotated, [hull], -1, draw_color, 2)
+    #         cv2.circle(annotated, (int(cx), int(cy)), 3, (0, 0, 0), -1)
+    #         cv2.putText(
+    #             annotated,
+    #             f"{color} r={ratio:.2f} h={z_top:.0f}",
+    #             (int(cx) - 30, int(cy) - 10),
+    #             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2
+    #         )
+
+   
+    #         blocks.append({
+    #             "color": color,
+    #             "color_ratio": float(ratio),
+    #             "center_px": (int(cx), int(cy)),
+    #             "angle_deg": float(cand.get("angle", 0.0)),
+    #             "rect_area": float(cand.get("rect_area", 0.0)),
+    #             "contour": hull,
+    #             "z_top": float(z_top),
+    #             "area": float(cv2.contourArea(contour)),
+    #         })
+
+    #     self.block_detections = blocks
+    #     self.VideoFrameWarped = annotated
+
+    #     print("detected:", [(b["color"], b["z_top"], b["rect_area"], b["color_ratio"]) for b in blocks])
+
 
     def detectBlocksInDepthImage(self):
         """!
@@ -515,7 +632,7 @@ class Camera():
         cv2.rectangle(workspace_mask, (620, 340), (820, 670), 0, cv2.FILLED)
 
         # --- 2. Threshold by Height ---
-        zmin, zmax = 10, 200
+        zmin, zmax = 15, 200
         depth_threshold = cv2.inRange(height_map.astype(np.uint16), zmin, zmax)
         
         # Apply workspace mask to the threshold
@@ -535,7 +652,7 @@ class Camera():
         candidates = []
         for contour in contours:
             area = cv2.contourArea(contour)
-            if area < 320 or area > 3000:
+            if area < 500 or area > 3000:
                 continue
             
             rect = cv2.minAreaRect(contour)
@@ -545,7 +662,7 @@ class Camera():
                 continue
                 
             aspect_ratio = max(width, height) / min(width, height)
-            if aspect_ratio > 3:
+            if aspect_ratio > 1.32:
                 continue
                 
             rect_area = width * height
@@ -567,86 +684,11 @@ class Camera():
                 "rect_area": rect_area
             })
 
-        # CRITICAL FIX: Do NOT overwrite self.WorldHeightMap with the binary threshold.
-        # We need self.WorldHeightMap to remain as real depth data (mm) for blockDetector to use.
-        # self.WorldHeightMap = depth_threshold  <-- REMOVED THIS LINE
-
-        # Save the thresholded/masked image to a DIFFERENT variable if you need to see it
         self.DepthFrameWarped = self.vis_image
 
         return candidates
 
-    def detectBlocksInDepthImage(self):
-        """!
-        @brief      Detect blocks from depth
-        """
-        assert self.DepthFrameRaw is not None, "Depth frame not loaded"
-        
-        # Use WorldHeightMap as the source
-        height_map = self.WorldHeightMap
-        
-        # --- 1. Workspace Masking (Logic from detect_blocks) ---
-        workspace_mask = np.zeros_like(height_map, dtype=np.uint8)
-        # Outer bounds
-        cv2.rectangle(workspace_mask, (225, 0), (1170, 670), 255, cv2.FILLED)
-        # Inner "hole" (robot base)
-        cv2.rectangle(workspace_mask, (620, 340), (820, 670), 0, cv2.FILLED)
-
-        # --- 2. Threshold by Height ---
-        zmin, zmax = 10, 200
-        depth_threshold = cv2.inRange(height_map.astype(np.uint16), zmin, zmax)
-        
-        # Apply workspace mask
-        depth_threshold = cv2.bitwise_and(depth_threshold, workspace_mask)
-
-        # Clean up noise
-        kernel = np.ones((4,4), np.uint8)
-        depth_threshold = cv2.morphologyEx(depth_threshold, cv2.MORPH_CLOSE, kernel)
-
-        # --- 3. Find and Filter Contours ---
-        contours, _ = cv2.findContours(depth_threshold, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        self.vis_image = cv2.cvtColor(depth_threshold, cv2.COLOR_GRAY2BGR)
-        candidates = []
-        for contour in contours:
-            # Area filter
-            area = cv2.contourArea(contour)
-            if area < 320 or area > 3000:
-                continue
-            
-            # Geometry filter (Aspect Ratio & Rect Area)
-            rect = cv2.minAreaRect(contour)
-            (center_x, center_y), (width, height), angle = rect
-            
-            # Safety check for zero dimensions
-            if width < 1 or height < 1:
-                continue
-                
-            aspect_ratio = max(width, height) / min(width, height)
-            if aspect_ratio > 3: # Ignore long skinny objects
-                continue
-                
-            rect_area = width * height
-            if rect_area < 50 or rect_area > 3000:
-                continue
-
-            # Correct the angle for block orientation
-            if width < height:
-                angle = (90 + angle) % 180
-            else:
-                angle = angle % 180
-
-            candidates.append({
-                "contour": contour,
-                "center": (int(center_x), int(center_y)),
-                "angle": angle,
-                "rect_area": rect_area
-            })
-
-        # Optional: Update the map for visualization if needed, otherwise this line can be removed
-        self.WorldHeightMap = depth_threshold 
-
-        return candidates
-
+ 
     def projectGridInRGBImage(self):
         """!
         @brief      projects
