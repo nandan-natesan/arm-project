@@ -130,6 +130,10 @@ class Gui(QMainWindow):
         self.ui.btnUser8.clicked.connect(partial(nxt_if_arm_init, 'click_to_grab'))
         self.ui.btnUser9.setText('Test Wrist Align')
         self.ui.btnUser9.clicked.connect(partial(nxt_if_arm_init, 'test_wrist_align'))
+        self.ui.btnUser10.setText("Auto L1")
+        self.ui.btnUser10.clicked.connect(lambda: self.sm.set_next_state("auto_L1"))
+        self.ui.btnUser11.setText("Go Home Test")
+        self.ui.btnUser11.clicked.connect(lambda: self.sm.set_next_state("go_home_test"))
         
         # Sliders
         for sldr in self.joint_sliders:

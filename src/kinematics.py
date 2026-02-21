@@ -518,7 +518,8 @@ def IK_geometric(pose, block_angle_deg):
         theta5 = 0.0
     else:
         #TO BE FIXED
-        #theta5 = (np.pi/2 - theta1) + block_angle_rad
+        theta5 = (np.pi/2 + block_angle_rad - theta1)
+        theta5 = clamp(theta5)
 
         print(f"[WRIST DEBUG] === compute_wrist_roll ===")
         print(f"[WRIST DEBUG] block_angle_deg (from detector): {block_angle_deg:.1f}°")
@@ -546,3 +547,60 @@ def IK_geometric(pose, block_angle_deg):
 
     # return joint positions
     return np.array([q1, q2, q3, q4, q5], dtype=float)
+
+
+# def IK_geometric(dh_params, pose):
+#     l1 = 103.91
+#     l2 = 205.73
+#     l3 = 200
+#     l4 = 165
+#     l2_dtheta = 14 * np.pi / 180
+
+#     x, y, z, phi, the, psi = pose
+#     psi = -np.pi if psi < -np.pi else np.pi if psi > np.pi else psi
+    
+#     theta1 = np.arctan2(-x, y)
+#     theta1 = (theta1 + np.pi) % (2*np.pi) - np.pi
+
+#     ee_z = np.array([
+#         -1 * np.sin(theta1)*np.cos(the), 
+#         np.cos(theta1)*np.cos(the), 
+#         -1 * np.sin(the)
+#     ])
+#     xc, yc, zc = np.array([x, y, z]) - l4 * ee_z
+
+#     r = np.sqrt(xc**2 + yc**2)
+#     s = zc - l1
+
+#     dist = np.sqrt(r**2 + s**2)
+#     if dist > (l2 + l3) + 1e-6:
+#         # unreachable position
+#         return np.zeros((1, 5))
+
+#     cos_elbow = (r*r + s*s - l2*l2 - l3*l3) / (-2.0 * l2 * l3)
+#     cos_elbow = np.clip(cos_elbow, -1.0, 1.0)
+
+#     elbow_angles = np.array([
+#          np.arccos(cos_elbow),
+#     ])
+
+
+    
+#     sols = []
+#     for th3_raw in elbow_angles:
+#         th2_raw = np.arctan2(s,r) + np.arccos((l2**2 + r**2 + s**2 - l3**2) / (2 * l2 * np.sqrt(r**2 + s**2)))
+
+#         th2 = (np.pi/2) - th2_raw - l2_dtheta
+#         th3 = (np.pi/2) - th3_raw + l2_dtheta
+#         th4 = the - (th2 + th3)
+
+#         th5 = psi
+
+#         q = np.array([theta1, th2, th3, th4, th5], dtype=float)
+#         q = (q + np.pi) % (2.0*np.pi) - np.pi
+#         sols.append(q)
+
+#     solutions = np.vstack(sols)
+    
+#     return solutions
+
