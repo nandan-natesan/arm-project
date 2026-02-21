@@ -7,7 +7,7 @@ import numpy as np
 import rclpy
 import cv2
 from cv_bridge import CvBridge
-from kinematics import IK_geometric, FK_dh, compute_wrist_roll
+from kinematics import IK_geometric, FK_dh, compute_wrist_roll, IK_geometric_stack, find_feasible_ik, check_joint_limits
 class StateMachine():
     """!
     @brief      This class describes a state machine.
@@ -51,15 +51,16 @@ class StateMachine():
         # ---------- Auto sort/stack parameters ----------
         # ---------- Sort/Stack memory (their idea) ----------
         self.COLOR_ORDER = "roygbv"
-        self.BLOCK_H = {"l": 38.1, "s": 25.4}     # mm
+        self.BLOCK_H = {"l": 21, "s": 10}     # mm
         self.NUM_TOWER_BLOCKS = 3                 # L2/L3
 
         # drop zones: negative y (required). small left, large right
         self.DROP_XY = {
-            "s": np.array([-160.0, 250.0], dtype=float),
-            "l": np.array([ 160.0, 250.0], dtype=float),
+            "s": np.array([-160.0, 100.0], dtype=float),
+            "l": np.array([ 160.0, 100.0], dtype=float),
         }
-        self.DROP_Z0 = 35.0  # base z at table (tune)
+        self.DROP_Z0 = 15.0  # base z at table (tune)
+        
 
         # stacking height counters
         self.tower_h = {"s": 0.0, "l": 0.0}
@@ -129,16 +130,16 @@ class StateMachine():
             self.auto_sort_stack(level=2)
         if self.next_state == "auto_L3":
             self.auto_sort_stack(level=3)
-        if self.next_state == "go_home_test":
-            print("Going home...")
-            self.goto_observe_pose(wait=2.0)
+        if self.next_state == "event_2":
+            self.event_2()
+
+
+        if self.next_state =="challenge_three":
+            self.challenge_three()
                 
 # # ####################################test
-    def _topdown_pose6(self, x, y, z, psi):
-        phi = 0.0
-        the = np.pi / 2.0
-        return np.array([float(x), float(y), float(z), phi, the, float(psi)], dtype=float)
-    def _move_xyz(self, xyz_mm, block_angle_deg=0.0, wait=0.8, slow=True):
+
+    def _move_xyz(self, xyz_mm, block_angle_deg=0.0, wait=1.5, slow=True, place=False):
         if slow:
             self.rxarm.moving_time = 3.5
             self.rxarm.accel_time  = 3.0
@@ -150,6 +151,7 @@ class StateMachine():
             return False
 
         q = np.asarray(q, dtype=float).reshape(-1)
+
         self.rxarm.set_positions(q)
         time.sleep(wait)
         return True
@@ -172,7 +174,7 @@ class StateMachine():
 
     def _classify_size_key(self, det: dict) -> str:
         area = float(det.get("rect_area", 0.0))
-        return "l" if area >= 900.0 else "s"
+        return "l" if area >= 1200.0 else "s"
 
     def _build_block_dict(self, level: int):
         self.camera.blockDetector()
@@ -207,7 +209,7 @@ class StateMachine():
 
             # 5) attach angle for IK
             angle_deg = float(d.get("angle_deg", 0.0))
-            print(f"  - Block: size={sz}, color={c_letter}, xyz=({xyz[0]:.1f},{xyz[1]:.1f},{xyz[2]:.1f}), angle={angle_deg:.1f}°")
+            # print(f"  - Block: size={sz}, color={c_letter}, xyz=({xyz[0]:.1f},{xyz[1]:.1f},{xyz[2]:.1f}), angle={angle_deg:.1f}°")
 
             block_dict[sz][c_letter].append({
                 "xyz": xyz,
@@ -228,10 +230,10 @@ class StateMachine():
         xyz = np.asarray(xyz, dtype=float).reshape(3)
 
         hover_xyz = xyz.copy()
-        hover_xyz[2] += 80.0          # hover above
+        hover_xyz[2] += 300.0          # hover above
 
         pick_xyz = xyz.copy()
-        pick_xyz[2] -=4.0          # grab offset (tune)
+        pick_xyz[2] -=9.0          # grab offset (tune)
         return hover_xyz, pick_xyz
 
     def _dropoff_targets(self, sz, level, place_idx):
@@ -245,7 +247,7 @@ class StateMachine():
         if level == 1:
 
             sign = -1.0 if sz == "s" else 1.0
-            base_xy[0] = base_xy[0] + sign * 70.0 * place_idx
+            base_xy[0] = base_xy[0] + sign * 80.0 * place_idx
             z = self.DROP_Z0
         else:
 
@@ -253,7 +255,7 @@ class StateMachine():
 
         drop_xyz = np.array([base_xy[0], base_xy[1], z], dtype=float)
         hover_xyz = drop_xyz.copy()
-        hover_xyz[2] += 80.0
+        hover_xyz[2] += 450
         return hover_xyz, drop_xyz
 
 
@@ -287,9 +289,61 @@ class StateMachine():
         place_idx = {"s": 0, "l": 0}   # for level 1 spread placement
         do_stack = (level >= 2)
         cached_block_dict = None
-        if level <3:
+       
+        cached_block_dict = self._build_block_dict(level)
+        Z_TWO_HIGH = 55.0
+        dump_i = 0
+
+        if level >= 3:
+            highs = []
+            for sz in ["s", "l"]:
+                for c in self.COLOR_ORDER:
+                    for cand in cached_block_dict [sz][c]:
+                        zt = float(cand.get("z_top", cand["xyz"][2]))
+                        if zt > Z_TWO_HIGH:
+                            highs.append((zt, cand, sz))
+
+            k = len(highs)
+                
+            for i in range(k):
+
+                highs.sort(key=lambda t: -t[0])
+                cand = highs[i][1]
+                sz = highs[i][2]
+                xyz = cand["xyz"]
+                ang = cand["angle_deg"]
+
+                # pick
+                ho_pick, pick = self._pickup_targets(xyz, sz) 
+                self._move_xyz(ho_pick, ang, wait=1.0, slow=True)
+                self._move_xyz(pick,   ang, wait=2.0, slow=True)
+                time.sleep(2.0)
+                self.rxarm.gripper.grasp()
+                time.sleep(1.0)
+                self._move_xyz(ho_pick, ang, wait=2.0, slow=True)
+
+                # dump (spread along x)
+                dump_xyz = np.array([0.0, 200.0, 5.0], dtype=float)
+                dump_xyz[0] += 70.0 * dump_i
+                dump_i += 1
+
+                ho_drop = dump_xyz.copy(); ho_drop[2] += 80.0
+                self._move_xyz(ho_drop, 0.0, wait=1.0, slow=True)   # place angle fixed ok
+                self._move_xyz(dump_xyz, 0.0, wait=2.0, slow=True)
+                self.rxarm.gripper.release()
+                time.sleep(1.0)
+                self._move_xyz(ho_drop, 0.0, wait=2.0, slow=True)
+
+
+
+
             cached_block_dict = self._build_block_dict(level)
-        print("block_dict", cached_block_dict)
+
+
+
+
+
+        # print("block_dict", cached_block_dict)
         while True:
             if time.time() - t0 > 175:
                 break
@@ -298,7 +352,7 @@ class StateMachine():
             block_dict = cached_block_dict if cached_block_dict is not None else self._build_block_dict(level)
 
             sz, c, cand = self._select_next_block_like_them(block_dict)
-            print(f"Next target: size={sz}, color={c}, candidate={cand}")
+            # print(f"Next target: size={sz}, color={c}, candidate={cand}")
             if cand is None:
                 break
 
@@ -307,11 +361,11 @@ class StateMachine():
 
             # ---------- PICK ----------
             ho_pick, pick = self._pickup_targets(xyz, sz)
-            print(f"Pick targets: hover=({ho_pick[0]:.1f},{ho_pick[1]:.1f},{ho_pick[2]:.1f}), pick=({pick[0]:.1f},{pick[1]:.1f},{pick[2]:.1f}), angle={angle_deg:.1f}°")
+            # print(f"Pick targets: hover=({ho_pick[0]:.1f},{ho_pick[1]:.1f},{ho_pick[2]:.1f}), pick=({pick[0]:.1f},{pick[1]:.1f},{pick[2]:.1f}), angle={angle_deg:.1f}°")
 
-            if not self._move_xyz(ho_pick, angle_deg, wait=1.0, slow=True):
+            if not self._move_xyz(ho_pick, angle_deg, wait=1.0, slow=True,place=False):
                 continue
-            if not self._move_xyz(pick, angle_deg, wait=2.0, slow=True):
+            if not self._move_xyz(pick, angle_deg, wait=2.0, slow=True,place =False):
                 continue
             time.sleep(1.0)
             print(f"Grasping...")
@@ -324,11 +378,11 @@ class StateMachine():
             # ---------- PLACE ----------
             ho_drop, drop = self._dropoff_targets(sz, level, place_idx[sz])
 
-            if not self._move_xyz(ho_drop, angle_deg, wait=1.0, slow=True):
+            if not self._move_xyz(ho_drop, 0, wait=1.0, slow=True,place = True):
                 self.rxarm.gripper.release()
                 time.sleep(1.0)
                 continue
-            if not self._move_xyz(drop, angle_deg, wait=2.0, slow=True):
+            if not self._move_xyz(drop, 0, wait=2.0, slow=True,place = True):
                 self.rxarm.gripper.release()
                 time.sleep(1.0)
                 continue
@@ -956,6 +1010,332 @@ class StateMachine():
         self.next_state = "idle"
         time.sleep(5)
 
+    def challenge_three(self):
+
+        """Stack large blocks as high as possible at a fixed world location."""
+
+        self.current_state = "challenge_three"
+
+        self.status_message = "Challenge 3: Starting..."
+
+        # ── Tunable constants ──
+
+        BLOCK_HEIGHT     = 38.0     # large block height in mm (measure and adjust)
+
+        STACK_X          = 0.0      # world X of stack center (mm)
+
+        STACK_Y          = 225.0    # world Y of stack center (mm)
+
+        APPROACH_CLEARANCE = 80.0   # mm above target for approach waypoint
+
+        GRIP_OFFSET      = 15.0     # mm below z_top for pick grip center
+
+        PLACE_OFFSET     = 5.0      # mm above stack top when releasing
+
+        STACK_PROXIMITY  = 60.0     # mm — ignore detected blocks this close to stack
+
+        MOVE_TIME_FAST   = 1.5      # seconds for large moves
+
+        MOVE_TIME_SLOW   = 1.2      # seconds for short approach/descend
+
+        ACCEL_TIME       = 0.4
+
+        SETTLE_TIME      = 1.0      # seconds to wait after moving to scan pose
+
+        MAX_BLOCKS       = 20       # safety cap
+
+        TIMEOUT          = 580.0    # seconds (keep 20s buffer from 600s limit)
+
+        # scan pose: arm pointing up, out of camera view
+
+        SCAN_POSE = np.array([0.0, 0.0, -1.57, 0.0, 0.0])
+
+        blocks_stacked = 0
+
+        start_time = time.time()
+
+        def elapsed():
+
+            return time.time() - start_time
+
+        def move(q, mt=MOVE_TIME_FAST):
+
+            self.rxarm.set_moving_time(mt)
+
+            self.rxarm.set_accel_time(ACCEL_TIME)
+
+            self.rxarm.set_positions(np.asarray(q, dtype=float).reshape(-1))
+
+            time.sleep(mt + 0.3)
+
+        def goto_xyz(xyz, block_angle=0.0, pref_psi=-np.pi/2, mt=MOVE_TIME_FAST):
+
+            q, psi = find_feasible_ik(xyz, block_angle, pref_psi)
+
+            if q is None:
+
+                print(f"[C3] UNREACHABLE: {xyz}, pref_psi={pref_psi:.2f}")
+
+                return False, None
+
+            move(q, mt)
+
+            return True, psi
+
+        while blocks_stacked < MAX_BLOCKS and elapsed() < TIMEOUT:
+
+            self.status_message = f"C3: Stacked {blocks_stacked} — scanning..."
+
+            # ─── 1. Move to scan position ───
+
+            move(SCAN_POSE, MOVE_TIME_FAST)
+
+            time.sleep(SETTLE_TIME)
+
+            # ─── 2. Read detected blocks ───
+
+            detections = getattr(self.camera, 'block_detections', None)
+
+            if not detections or len(detections) == 0:
+
+                print("[C3] No blocks detected, retrying...")
+
+                time.sleep(1.0)
+
+                detections = getattr(self.camera, 'block_detections', None)
+
+                if not detections or len(detections) == 0:
+
+                    print("[C3] Still no blocks. Done.")
+
+                    break
+
+            # ─── 3. Filter out blocks near the stack ───
+
+            candidates = []
+
+            for blk in detections:
+
+                cx, cy = blk['center_px']
+
+                w_pos = self.camera.pixel_to_world(cx, cy)
+
+                if w_pos is None:
+
+                    continue
+
+                w_pos = np.asarray(w_pos, dtype=float).ravel()
+
+                dist_to_stack = np.hypot(w_pos[0] - STACK_X, w_pos[1] - STACK_Y)
+
+                if dist_to_stack < STACK_PROXIMITY:
+
+                    continue
+
+                candidates.append((blk, w_pos))
+
+            if not candidates:
+
+                print("[C3] No pickable blocks (all near stack or none). Done.")
+
+                break
+
+            # pick the block closest to the arm base (easiest reach)
+
+            candidates.sort(key=lambda c: np.hypot(c[1][0], c[1][1]))
+
+            chosen_blk, pick_world = candidates[0]
+
+            angle_deg = chosen_blk.get('angle_deg', 0.0)
+
+            pick_z = pick_world[2]
+
+            print(f"[C3] Picking block at world ({pick_world[0]:.1f}, {pick_world[1]:.1f}, {pick_z:.1f}), angle={angle_deg:.1f}°")
+
+            self.status_message = f"C3: Picking block #{blocks_stacked+1}..."
+
+            # ─── 4. PICK: approach → descend → grasp → retreat ───
+
+            self.rxarm.gripper.release()
+
+            time.sleep(0.3)
+
+            # approach above block (tool-down)
+
+            approach_pick = np.array([pick_world[0], pick_world[1], pick_z + APPROACH_CLEARANCE])
+
+            ok, _ = goto_xyz(approach_pick, angle_deg, -np.pi/2, MOVE_TIME_FAST)
+
+            if not ok:
+
+                print("[C3] Can't reach pick approach, skipping block")
+
+                continue
+
+            # descend to grip
+
+            descend_pick = np.array([pick_world[0], pick_world[1], pick_z - GRIP_OFFSET])
+
+            ok, _ = goto_xyz(descend_pick, angle_deg, -np.pi/2, MOVE_TIME_SLOW)
+
+            if not ok:
+
+                print("[C3] Can't reach pick descend, skipping block")
+
+                continue
+
+            self.rxarm.gripper.grasp()
+
+            time.sleep(0.5)
+
+            # retreat
+
+            goto_xyz(approach_pick, angle_deg, -np.pi/2, MOVE_TIME_SLOW)
+
+            # ─── 5. PLACE: transit → approach stack → descend → release → retreat ───
+
+            stack_z = blocks_stacked * BLOCK_HEIGHT
+
+            place_z = stack_z + PLACE_OFFSET
+
+            self.status_message = f"C3: Placing block #{blocks_stacked+1} at z={place_z:.0f}mm..."
+
+            # transit to scan pose first to avoid sweeping over the workspace
+
+            move(SCAN_POSE, MOVE_TIME_FAST)
+
+            # approach above stack
+
+            approach_stack = np.array([STACK_X, STACK_Y, place_z + APPROACH_CLEARANCE])
+
+            ok, used_psi = goto_xyz(approach_stack, 0.0, -np.pi/2, MOVE_TIME_FAST)
+
+            if not ok:
+
+                print(f"[C3] Can't reach stack approach at z={place_z + APPROACH_CLEARANCE:.0f}. Dropping block and stopping.")
+
+                self.rxarm.gripper.release()
+
+                break
+
+            # descend to place (use adaptive psi)
+
+            place_target = np.array([STACK_X, STACK_Y, place_z])
+
+            ok, used_psi = goto_xyz(place_target, 0.0, -np.pi/2, MOVE_TIME_SLOW)
+
+            if not ok:
+
+                print(f"[C3] Can't reach place target z={place_z:.0f}. Dropping block and stopping.")
+
+                self.rxarm.gripper.release()
+
+                break
+
+            print(f"[C3] Placing with psi={np.rad2deg(used_psi):.1f}° at z={place_z:.0f}mm")
+
+            self.rxarm.gripper.release()
+
+            time.sleep(0.4)
+
+            # retreat above stack
+
+            goto_xyz(approach_stack, 0.0, -np.pi/2, MOVE_TIME_SLOW)
+
+            blocks_stacked += 1
+
+            print(f"[C3] ✓ Block #{blocks_stacked} placed. Elapsed: {elapsed():.1f}s")
+
+        # ─── Done ───
+
+        move(SCAN_POSE, MOVE_TIME_FAST)
+
+        self.status_message = f"C3: Done! Stacked {blocks_stacked} blocks in {elapsed():.1f}s"
+
+        print(self.status_message)
+
+        self.next_state = "idle"
+
+
+    def event_2(self):
+            block_detections = self.camera.block_detections
+
+            # Catch for no block detections
+            if block_detections is None or block_detections == 0:
+                self.status_message = "No blocks detected"
+                self.next_state = "idle"
+                return
+
+            # set allowable colours and create empty lists for small and large blocks
+            colours = ["red","orange","yellow","green","blue","purple"]
+            small_blocks, large_blocks = [], []
+
+            # assign block sizes
+            for block in block_detections:
+                # ignore any block not in color scope
+                if block["color"] not in colours:
+                    continue
+                # convert block center point to world point
+                # convert block orientation to rad
+                world = self.camera.pixel_to_world(block["center_px"])
+                block["xyz"] = np.array(world[:3])
+                block["psi"] = np.deg2rad(block["angle_deg"])
+
+                # sort into large and small
+                # PHYSICAL TUNING REQUIRED
+                if block["area"] <= 800:
+                    small_blocks.append(block)
+                else:
+                    large_blocks.append(block)
+
+            # sort small and large blocks by colour
+            small_blocks = sorted(small_blocks, key=lambda x: colours.index(x["color"]))
+            large_blocks = sorted(large_blocks, key=lambda x: colours.index(x["color"]))
+
+            def pick_block(pick_position, block_orientation):
+                # SAFETY OFFSETS
+                approach_height = 50
+                grip_offset = 15
+                approach_target = pick_position[2] + approach_height
+                grip_target = pick_position[2] - grip_offset
+                IK_geometric(approach_target, block_orientation)
+                time.sleep(1)
+                IK_geometric(grip_target, block_orientation)
+                self.rxarm.gripper.grasp()
+
+            def move_block(from_position, to_position):
+                # SAFETY OFFSETS
+                move_height = 150
+                IK_geometric(from_position[2] + move_height, 0.0)
+                time.sleep(1)
+                IK_geometric(to_position[2] + move_height, 0.0)
+
+            def place_block(place_position, block_orientation):
+                # SAFETY OFFSETS
+                approach_height = 50
+                drop_offset = 20
+                approach_target = place_position[2] + approach_height
+                drop_target = place_position[2] + drop_offset
+                IK_geometric(approach_target, block_orientation)
+                time.sleep(1)
+                IK_geometric(drop_target, block_orientation)
+                self.rxarm.gripper.release()
+
+            # ---- PLACE LARGE LINE ----
+            for i, block in enumerate(large_blocks):
+                target = np.array([-175 + i*50, 250, 0])
+                pick_block(block["xyz"], block["psi"])
+                move_block(block["xyz"], target)
+                place_block(target, 0.0)
+
+            # ---- PLACE SMALL LINE ----
+            for i, block in enumerate(small_blocks):
+                target = np.array([-175 + i*50, 175, 0])
+                pick_block(block["xyz"], block["psi"])
+                move_block(block["xyz"], target)
+                place_block(target, 0.0)
+
+            self.next_state = "idle"
 
 
 class StateMachineThread(QThread):

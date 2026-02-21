@@ -438,15 +438,11 @@ def IK_geometric(pose, block_angle_deg):
     l3 = 200.0
     l4 = 174.15
 
-    # psi candidates for tool down or tool flat
+    # psi candidates for tool down or tool 45
     psi_down = -np.pi/2
     psi_flat = 0.0
-    psi = psi_down  # set default
 
-    # block angle
-    block_angle_deg = round(block_angle_deg / 45.0) * 45.0
-    if block_angle_deg >= 180.0:
-        block_angle_deg -= 180.0
+    # block angle conversion to rad
     block_angle_rad = np.deg2rad(block_angle_deg)
 
     #extract x, y, z from pose
@@ -473,10 +469,13 @@ def IK_geometric(pose, block_angle_deg):
     y_wc_down = y0 - l4 * np.sin(psi_down)
     l_wc_down = np.hypot(x_wc_down, y_wc_down)
 
-    if l_wc_down <= rmax + 1e-6:
-        psi = psi_down
+    # Select psi based on whether wrist center is within rmax of the shoulder or if z is high (which also requires tool down)
+    # change height transition accordingly
+    height_transition = 100
+    if l_wc_down <= rmax + 1e-6 or z_p <= height_transition + 1e-6:
+         psi = psi_down
     else:
-        psi = psi_flat
+         psi = psi_flat
 
     # ----------------------------
     # IK solve for chosen psi
@@ -517,26 +516,8 @@ def IK_geometric(pose, block_angle_deg):
     if psi == psi_flat:
         theta5 = 0.0
     else:
-        #TO BE FIXED
         theta5 = (block_angle_rad + theta1)
         theta5 = clamp(theta5)
-
-        print(f"[WRIST DEBUG] === compute_wrist_roll ===")
-        print(f"[WRIST DEBUG] block_angle_deg (from detector): {block_angle_deg:.1f}°")
-        print(f"[WRIST DEBUG] block_angle_rad: {block_angle_rad:.4f} rad")
-        print(f"[WRIST DEBUG] theta1 (base): {theta1:.4f} rad = {np.rad2deg(theta1):.1f}°")
-        #raw = block_angle_rad - theta1 + np.pi / 2
-        #print(f"[WRIST DEBUG] raw theta5 (block - theta1 + pi/2): {raw:.4f} rad = {np.rad2deg(raw):.1f}°")
-        #theta5 = clamp(raw)
-        print(f"[WRIST DEBUG] after clamp: {theta5:.4f} rad = {np.rad2deg(theta5):.1f}°")
-        #before_sym = theta5
-        #if theta5 > np.pi / 2:
-        #    theta5 -= np.pi
-        #elif theta5 < -np.pi / 2:
-        #    theta5 += np.pi
-        #print(f"[WRIST DEBUG] after symmetry: {theta5:.4f} rad = {np.rad2deg(theta5):.1f}° (changed={before_sym != theta5})")
-        print(f"[WRIST DEBUG] ========================")
-
 
     # Convert geometric to motor angles
     q1 = theta1
@@ -547,6 +528,142 @@ def IK_geometric(pose, block_angle_deg):
 
     # return joint positions
     return np.array([q1, q2, q3, q4, q5], dtype=float)
+
+def check_joint_limits(q):
+
+    """Returns True if all motor angles are within RX200 hardware limits."""
+
+    limits = [
+
+        (-3.14,  3.14),
+
+        (-1.885, 1.972),
+
+        (-1.885, 1.623),
+
+        (-1.745, 2.147),
+
+        (-3.14,  3.14),
+
+    ]
+
+    for i, (lo, hi) in enumerate(limits):
+
+        if q[i] < lo - 1e-4 or q[i] > hi + 1e-4:
+
+            return False
+
+    return True
+
+def IK_geometric_stack(pose, psi, block_angle_deg=0.0, elbow_up=True):
+
+    """
+
+    IK with explicit approach angle psi and elbow configuration.
+
+    psi = -pi/2 -> tool points straight down
+
+    psi = 0     -> tool points horizontally forward
+
+    """
+
+    l1 = 103.91 + 1.5
+
+    l2 = 205.73
+
+    l3 = 200.0
+
+    l4 = 174.15
+
+    x_p, y_p, z_p = float(pose[0]), float(pose[1]), float(pose[2])
+
+    theta1 = np.arctan2(-x_p, y_p)
+
+    x0 = np.hypot(x_p, y_p)
+
+    y0 = z_p - l1
+
+    x_wc = x0 - l4 * np.cos(psi)
+
+    y_wc = y0 - l4 * np.sin(psi)
+
+    l_wc2 = x_wc**2 + y_wc**2
+
+    l_wc = np.sqrt(l_wc2)
+
+    if l_wc > (l2 + l3) + 1e-6 or l_wc < abs(l2 - l3) - 1e-6:
+
+        return None
+
+    c = (l_wc2 - l2**2 - l3**2) / (2.0 * l2 * l3)
+
+    c = np.clip(c, -1.0, 1.0)
+
+    s_val = np.sqrt(max(0.0, 1.0 - c * c))
+
+    if not elbow_up:
+
+        s_val = -s_val
+
+    alpha = np.arctan2(s_val, c)
+
+    gamma1 = np.arctan2(y_wc, x_wc)
+
+    gamma2 = np.arctan2(l3 * np.sin(alpha), l2 + l3 * np.cos(alpha))
+
+    theta2 = np.pi / 2 - gamma1 - gamma2
+
+    theta3 = alpha
+
+    theta4 = np.pi / 2 - psi - theta2 - theta3
+
+    theta5 = 0.0
+
+    if abs(psi - (-np.pi / 2)) < 0.1 and abs(block_angle_deg) > 1e-3:
+
+        ba = np.deg2rad(round(block_angle_deg / 45.0) * 45.0 % 180.0)
+
+        theta5 = clamp(np.pi / 2 + ba - theta1)
+
+    q = np.array([
+
+        theta1,
+
+        theta2 - 0.245,
+
+        theta3 - 1.3258,
+
+        theta4,
+
+        theta5
+
+    ], dtype=float)
+
+    return q
+
+def find_feasible_ik(pose, block_angle_deg=0.0, preferred_psi=-np.pi/2):
+
+    """
+
+    Tries psi values from preferred_psi toward 0, with both elbow configs.
+
+    Returns (q, psi) for the most vertical feasible solution, or (None, None).
+
+    """
+
+    psi_candidates = np.linspace(preferred_psi, 0.0, 13)
+
+    for psi in psi_candidates:
+
+        for elbow_up in [True, False]:
+
+            q = IK_geometric_stack(pose, psi, block_angle_deg, elbow_up)
+
+            if q is not None and check_joint_limits(q):
+
+                return q, psi
+
+    return None, None
 
 
 # def IK_geometric(dh_params, pose):
