@@ -572,6 +572,8 @@ class Camera():
         }
 
         annotated = rgb_bd.copy()
+        # annotated = self.WorldHeightMap
+
         blocks = []
 
         for cand in candidates:
@@ -597,7 +599,6 @@ class Camera():
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2
             )
 
-   
             blocks.append({
                 "color": color,
                 "color_ratio": float(ratio),
@@ -632,7 +633,7 @@ class Camera():
         cv2.rectangle(workspace_mask, (620, 340), (820, 670), 0, cv2.FILLED)
 
         # --- 2. Threshold by Height ---
-        zmin, zmax = 15, 200
+        zmin, zmax = 10, 600
         depth_threshold = cv2.inRange(height_map.astype(np.uint16), zmin, zmax)
         
         # Apply workspace mask to the threshold
@@ -652,7 +653,7 @@ class Camera():
         candidates = []
         for contour in contours:
             area = cv2.contourArea(contour)
-            if area < 500 or area > 3000:
+            if area < 400 or area > 3000:
                 continue
             
             rect = cv2.minAreaRect(contour)
@@ -682,7 +683,7 @@ class Camera():
             })
 
         self.DepthFrameWarped = self.vis_image
-
+        print(f"Depth-based candidates: {len(candidates)}")
         return candidates
 
  

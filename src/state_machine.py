@@ -49,21 +49,23 @@ class StateMachine():
         self.gripper_opened = True
         self.drop_height = None
         # ---------- Auto sort/stack parameters ----------
-        # negative y area requirement: put everything to y < 0
-        self.AUTO_SMALL_BASE = np.array([-160.0, 200.0, 35.0], dtype=float)  # left side
-        self.AUTO_LARGE_BASE = np.array([ 160.0, 200.0, 35.0], dtype=float)  # right side
+        # ---------- Sort/Stack memory (their idea) ----------
+        self.COLOR_ORDER = "roygbv"
+        self.BLOCK_H = {"l": 38.1, "s": 25.4}     # mm
+        self.NUM_TOWER_BLOCKS = 3                 # L2/L3
 
-        # stacking heights (tune if needed)
-        self.H_SMALL = 25.4 + 6.0   # cube height + margin
-        self.H_LARGE = 38.1 + 6.0
+        # drop zones: negative y (required). small left, large right
+        self.DROP_XY = {
+            "s": np.array([-160.0, 250.0], dtype=float),
+            "l": np.array([ 160.0, 250.0], dtype=float),
+        }
+        self.DROP_Z0 = 35.0  # base z at table (tune)
 
-        # size classification by image area (tune for your detector)
-        self.AREA_THRESH = 1000.0
+        # stacking height counters
+        self.tower_h = {"s": 0.0, "l": 0.0}
 
-        # safety
-        self.APPROACH_DZ = 80.0
-        self.GRAB_Z_OFFSET = 12.0
-        self.PLACE_Z_OFFSET = 10.0
+        # remember placed (size,color) like them
+        self.placed_set = set()
 
         
 
@@ -132,49 +134,27 @@ class StateMachine():
             self.goto_observe_pose(wait=2.0)
                 
 # # ####################################test
-    def _dh_params_for_ik(self):
-        return np.array([
-            [0.,      1.571,   0.06566, 0.     ],
-            [0. ,     0.      , 0.03891, 0.     ],
-            [0.05    , 0.      , 0.2     , 0.     ],
-            [0.2     , 0.      , 0.      , 0.     ],
-            [0.065   , 0.      , 0.      , 0.     ],
-        ], dtype=float)
-
-    def _choose_ik_solution(self, solutions):
-        if solutions is None:
-            return None
-        sols = np.asarray(solutions, dtype=float)
-        if sols.ndim != 2 or sols.shape[1] != 5:
-            return None
-        if sols.shape[0] == 1 and np.allclose(sols[0], 0.0, atol=1e-9):
-            return None
-
-        # choose nearest to current joint state (more stable)
-        try:
-            q_cur = np.asarray(self.rxarm.get_positions(), dtype=float).reshape(-1)
-            q_cur = q_cur[:5]
-            costs = np.linalg.norm(sols - q_cur[None, :], axis=1)
-            return sols[int(np.argmin(costs))]
-        except Exception:
-            return sols[0]
-
     def _topdown_pose6(self, x, y, z, psi):
         phi = 0.0
         the = np.pi / 2.0
         return np.array([float(x), float(y), float(z), phi, the, float(psi)], dtype=float)
+    def _move_xyz(self, xyz_mm, block_angle_deg=0.0, wait=0.8, slow=True):
+        if slow:
+            self.rxarm.moving_time = 3.5
+            self.rxarm.accel_time  = 3.0
 
-    def _move_pose6(self, pose6, wait=1.0):
-        dh = self._dh_params_for_ik()
-        sols = IK_geometric(dh, pose6)
-        q = self._choose_ik_solution(sols)
+        xyz_mm = np.asarray(xyz_mm, dtype=float).reshape(3)
+
+        q = IK_geometric(xyz_mm, float(block_angle_deg))
         if q is None:
             return False
-        self.rxarm.moving_time = 4.0
-        self.rxarm.accel_time = 2.0
-        self.rxarm.set_positions(np.asarray(q, dtype=float).reshape(-1))
+
+        q = np.asarray(q, dtype=float).reshape(-1)
+        self.rxarm.set_positions(q)
         time.sleep(wait)
         return True
+
+
 
     def goto_observe_pose(self, wait=1.2):
         # raise arm to avoid blocking camera; tune (x,y,z) if needed
@@ -184,246 +164,198 @@ class StateMachine():
     # ---------------------------
     # perception helpers
     # ---------------------------
-    def _rainbow_rank(self, c):
-        order = ["red", "orange", "yellow", "green", "blue", "purple"]
-        c = (c or "").lower()
-        return order.index(c) if c in order else 999
 
-    def _classify_size(self, rect_area):
-        return "large" if float(rect_area) >= float(self.AREA_THRESH) else "small"
 
-    def _is_cube_like(self, det):
+    def _color_to_letter(self, color_name: str) -> str:
+        m = {"red":"r","orange":"o","yellow":"y","green":"g","blue":"b","purple":"v","violet":"v"}
+        return m.get((color_name or "").lower(), "?")
+
+    def _classify_size_key(self, det: dict) -> str:
+        area = float(det.get("rect_area", 0.0))
+        return "l" if area >= 900.0 else "s"
+
+    def _build_block_dict(self, level: int):
+        self.camera.blockDetector()
+        dets = getattr(self.camera, "block_detections", []) or []
+        print(f"Detected {len(dets)} blocks:")
+
+        block_dict = {
+            "l": {c: [] for c in "roygbv"},
+            "s": {c: [] for c in "roygbv"},
+        }
+
+        for d in dets:
+            # 1) color
+            c_letter = self._color_to_letter(d.get("color", "unknown"))
+            if c_letter not in "roygbv":
+                continue
+
+            # 2) size
+            sz = self._classify_size_key(d)
+
+            # 3) pixel -> world
+            cx, cy = d.get("center_px", (None, None))
+            if cx is None or cy is None:
+                continue
+            xyz = self.camera.pixel_to_world(int(cx), int(cy))
+            if xyz is None:
+                continue
+            xyz = np.asarray(xyz[:3], dtype=float)
+
+            # 4) optional: only pick blocks in front side (if needed)
+            # if xyz[1] < 50.0: continue
+
+            # 5) attach angle for IK
+            angle_deg = float(d.get("angle_deg", 0.0))
+            print(f"  - Block: size={sz}, color={c_letter}, xyz=({xyz[0]:.1f},{xyz[1]:.1f},{xyz[2]:.1f}), angle={angle_deg:.1f}°")
+
+            block_dict[sz][c_letter].append({
+                "xyz": xyz,
+                "angle_deg": angle_deg,
+                "det": d
+            })
+        cnt_s = sum(len(lst) for lst in block_dict["s"].values())
+        cnt_l = sum(len(lst) for lst in block_dict["l"].values())
+        print(f"Total: {cnt_s} small blocks, {cnt_l} large blocks")
+        return block_dict
+
+    def _pickup_targets(self, xyz, sz):
         """
-        Level 3 distractor filter.
-        Try best-effort using fields that usually exist in detectors.
-        If you don't have these fields, it gracefully falls back to 'True'.
+        returns (hover_xyz, pick_xyz)
+        hover: above block
+        pick: near surface
         """
-        # common patterns:
-        # - det["shape"] == "cube"
-        # - det["is_cube"] bool
-        # - det["aspect"] close to 1
-        if isinstance(det, dict):
-            if "is_cube" in det:
-                return bool(det["is_cube"])
-            if "shape" in det:
-                return str(det["shape"]).lower() in ["cube", "block"]
-            if "aspect" in det:
-                a = float(det["aspect"])
-                return 0.7 <= a <= 1.3
-        return True
+        xyz = np.asarray(xyz, dtype=float).reshape(3)
+
+        hover_xyz = xyz.copy()
+        hover_xyz[2] += 80.0          # hover above
+
+        pick_xyz = xyz.copy()
+        pick_xyz[2] -=4.0          # grab offset (tune)
+        return hover_xyz, pick_xyz
+
+    def _dropoff_targets(self, sz, level, place_idx):
+        """
+        returns (hover_xyz, drop_xyz)
+        - level 1: spread blocks (no stacking)
+        - level 2/3: stack at same xy, increase z using tower_h
+        """
+        base_xy = self.DROP_XY[sz].copy()
+
+        if level == 1:
+
+            sign = -1.0 if sz == "s" else 1.0
+            base_xy[0] = base_xy[0] + sign * 70.0 * place_idx
+            z = self.DROP_Z0
+        else:
+
+            z = self.DROP_Z0 + self.tower_h[sz]
+
+        drop_xyz = np.array([base_xy[0], base_xy[1], z], dtype=float)
+        hover_xyz = drop_xyz.copy()
+        hover_xyz[2] += 80.0
+        return hover_xyz, drop_xyz
+
+
 
     # ---------------------------
     # pick & place primitives
     # ---------------------------
-    def _pick_xyzyaw(self, xyz_mm, psi_rad):
-        x, y, z = float(xyz_mm[0]), float(xyz_mm[1]), float(xyz_mm[2])
-
-        # open first
-        self.rxarm.gripper.release()
-        time.sleep(0.25)
-
-        # approach
-        if not self._move_pose6(self._topdown_pose6(x, y, z + self.APPROACH_DZ, psi_rad), wait=1.2):
-            return False
-
-        # descend
-        if not self._move_pose6(self._topdown_pose6(x, y, z + self.GRAB_Z_OFFSET, psi_rad), wait=1.0):
-            return False
-
-        # grasp
-        self.rxarm.gripper.grasp()
-        time.sleep(0.35)
-
-        # retreat
-        if not self._move_pose6(self._topdown_pose6(x, y, z + self.APPROACH_DZ, psi_rad), wait=1.0):
-            return False
-
-        return True
-
-    def _place_xyzyaw(self, xyz_mm, psi_rad):
-        x, y, z = float(xyz_mm[0]), float(xyz_mm[1]), float(xyz_mm[2])
-
-        # approach above place
-        if not self._move_pose6(self._topdown_pose6(x, y, z + self.APPROACH_DZ, psi_rad), wait=1.0):
-            return False
-
-        # descend
-        if not self._move_pose6(self._topdown_pose6(x, y, z + self.PLACE_Z_OFFSET, psi_rad), wait=0.9):
-            return False
-
-        # release
-        self.rxarm.gripper.release()
-        time.sleep(0.25)
-
-        # retreat
-        if not self._move_pose6(self._topdown_pose6(x, y, z + self.APPROACH_DZ, psi_rad), wait=0.9):
-            return False
-
-        return True
+    def _select_next_block_like_them(self, block_dict):
+        """
+        returns (sz, c, cand) or (None,None,None)
+        sz in {'s','l'}, c in 'roygbv', cand has xyz + angle_deg
+        """
+        for sz in ["s", "l"]:  # you can swap order if you want large first
+            for c in self.COLOR_ORDER:
+                key = (sz, c)
+                if key in self.placed_set:
+                    continue
+                lst = block_dict.get(sz, {}).get(c, [])
+                if not lst:
+                    continue
+                return sz, c, lst[0]
+        return None, None, None
 
     def auto_sort_stack(self, level=2):
-            """
-            L1: sort only (no stacking)
-            L2: sort + stack rainbow (red bottom) for small and large towers
-            L3: same as L2 but has distractors; re-detect each cycle and filter non-cubes
-            """
-            self.current_state = f"auto_L{level}"
-            t0 = time.time()
-            TIME_LIMIT = 180.0
+        self.current_state = f"auto_L{level}"
+        t0 = time.time()
 
-            do_stack = (level >= 2)
+        # reset memory
+        self.tower_h = {"s": 0.0, "l": 0.0}
+        self.placed_set = set()
+        place_idx = {"s": 0, "l": 0}   # for level 1 spread placement
+        do_stack = (level >= 2)
+        cached_block_dict = None
+        if level <3:
+            cached_block_dict = self._build_block_dict(level)
+        print("block_dict", cached_block_dict)
+        while True:
+            if time.time() - t0 > 175:
+                break
 
-            def target_place(base_xyz, idx, size):
-                p = base_xyz.copy()
-                if do_stack:
-                    if size == "small":
-                        p[2] = base_xyz[2] + idx * self.H_SMALL
-                    else:
-                        p[2] = base_xyz[2] + idx * self.H_LARGE
-                else:
-                    # spread along x a bit if not stacking
-                    p[0] = base_xyz[0] + (idx * 70.0) * (1.0 if base_xyz[0] > 0 else -1.0)
-                return p
+            # refresh detection every loop (L3 needs this; L1/L2 also fine)
+            block_dict = cached_block_dict if cached_block_dict is not None else self._build_block_dict(level)
 
-            def detect_candidates():
-                # observe then detect
-                self.goto_observe_pose(wait=0.8)
-                print("goto observe pose for detection")
-                self.camera.blockDetector()
-                dets = getattr(self.camera, "block_detections", []) or []
-                print(f"Detected {len(dets)} blocks from camera.blockDetector()")
-                cands = []
+            sz, c, cand = self._select_next_block_like_them(block_dict)
+            print(f"Next target: size={sz}, color={c}, candidate={cand}")
+            if cand is None:
+                break
 
-                for d in dets:
-                    if not isinstance(d, dict):
-                        continue
+            xyz = cand["xyz"]
+            angle_deg = cand["angle_deg"]
 
-                    color = (d.get("color", "unknown") or "unknown").lower()
-                    if color == "unknown":
-                        continue
+            # ---------- PICK ----------
+            ho_pick, pick = self._pickup_targets(xyz, sz)
+            print(f"Pick targets: hover=({ho_pick[0]:.1f},{ho_pick[1]:.1f},{ho_pick[2]:.1f}), pick=({pick[0]:.1f},{pick[1]:.1f},{pick[2]:.1f}), angle={angle_deg:.1f}°")
 
-                    # level3: filter distractors best-effort
-                    if level >= 3 and (not self._is_cube_like(d)):
-                        continue
+            if not self._move_xyz(ho_pick, angle_deg, wait=1.0, slow=True):
+                continue
+            if not self._move_xyz(pick, angle_deg, wait=2.0, slow=True):
+                continue
+            time.sleep(1.0)
+            print(f"Grasping...")
+            self.rxarm.gripper.grasp()
+            time.sleep(1.0)
 
-                    # center pixel
-                    cx, cy = d.get("center_px", (None, None))
-                    if cx is None or cy is None:
-                        continue
+            self._move_xyz(ho_pick, angle_deg, wait=1.0, slow=True)
+            time.sleep(0.5)
 
-                    pose_world = self.camera.pixel_to_world(int(cx), int(cy))
-                    if pose_world is None:
-                        continue
-                    xyz = np.asarray(pose_world[:3], dtype=float).reshape(3)
+            # ---------- PLACE ----------
+            ho_drop, drop = self._dropoff_targets(sz, level, place_idx[sz])
 
-                    # only pick blocks in front (positive half plane)
-                    # your spec: blocks start at positive half-plane "in front of arm"
-                    # In your frame, usually y>0 means in front. If your frame is opposite, flip this threshold.
+            if not self._move_xyz(ho_drop, angle_deg, wait=1.0, slow=True):
+                self.rxarm.gripper.release()
+                time.sleep(1.0)
+                continue
+            if not self._move_xyz(drop, angle_deg, wait=2.0, slow=True):
+                self.rxarm.gripper.release()
+                time.sleep(1.0)
+                continue
+            time.sleep(1.0)
+            self.rxarm.gripper.release()
+            place_idx[sz] += 1
+            if level >= 2:
+                print(f"Placed {sz} block. Updating tower height.")
+                self.tower_h[sz] += self.BLOCK_H[sz]
+            time.sleep(0.25)
 
-                    rect_area = float(d.get("rect_area", 0.0))
-                    size = self._classify_size(rect_area)
+            self._move_xyz(ho_drop, angle_deg, wait=1.0, slow=True)
 
-                    # yaw from detector angle if exists
-                    angle_deg = float(d.get("angle_deg", 0.0))
-                    psi = np.deg2rad(angle_deg)
+            # ---------- UPDATE MEMORY (their idea) ----------
+            self.placed_set.add((sz, c))
+            if do_stack:
+                self.tower_h[sz] += self.BLOCK_H[sz]
 
-                    cands.append({
-                        "color": color,
-                        "size": size,
-                        "xyz": xyz,
-                        "psi": psi,
-                        "rect_area": rect_area,
-                        "angle_deg": angle_deg
-                    })
-
-                # rainbow ordering
-                smalls = sorted([c for c in cands if c["size"] == "small"], key=lambda x: self._rainbow_rank(x["color"]))
-                print("smalls:", [(c["color"], c["z_top"], c["rect_area"], c["color_ratio"]) for c in smalls])
-                larges = sorted([c for c in cands if c["size"] == "large"], key=lambda x: self._rainbow_rank(x["color"]))
-                print("larges:", [(c["color"], c["z_top"], c["rect_area"], c["color_ratio"]) for c in larges])
-                return smalls, larges
-
-            # main loop plan:
-            # L1: just do whatever order detected (still we sort rainbow to be safe)
-            # L2/L3: place idx=0.. in rainbow order into towers
-            self.status_message = f"Auto L{level}: detecting..."
-            smalls, larges = detect_candidates()
-
-            if len(smalls) == 0 and len(larges) == 0:
-                self.status_message = "Auto: no valid blocks detected"
-                self.next_state = "idle"
-                return
-
-            # For L2/L3, we *expect* 3 each; but don’t hard fail if less.
-            placed_small = 0
-            placed_large = 0
-
-            # do small tower first then large (either is fine)
-            while True:
-                if (time.time() - t0) > (TIME_LIMIT - 5.0):
+            # done condition for L2/L3
+            if level >= 2:
+                cnt_s = sum(1 for (s, _) in self.placed_set if s == "s")
+                cnt_l = sum(1 for (s, _) in self.placed_set if s == "l")
+                if cnt_s >= self.NUM_TOWER_BLOCKS and cnt_l >= self.NUM_TOWER_BLOCKS:
                     break
 
-                # refresh in L3 each cycle because stacks + distractors change view
-                if level >= 3:
-                    smalls, larges = detect_candidates()
-
-                # stop condition
-                if do_stack:
-                    done_small = (placed_small >= 3) or (len(smalls) == 0)
-                    done_large = (placed_large >= 3) or (len(larges) == 0)
-                    if done_small and done_large:
-                        break
-                else:
-                    if len(smalls) == 0 and len(larges) == 0:
-                        break
-
-                # pick next target: prioritize small until finished, then large
-                pick_item = None
-                if (not do_stack) or (placed_small < 3):
-                    if len(smalls) > 0:
-                        pick_item = smalls.pop(0)
-                if pick_item is None:
-                    if (not do_stack) or (placed_large < 3):
-                        if len(larges) > 0:
-                            pick_item = larges.pop(0)
-
-                if pick_item is None:
-                    # nothing left
-                    break
-
-                size = pick_item["size"]
-                color = pick_item["color"]
-
-                # place target is in negative y plane (required)
-                if size == "small":
-                    place_xyz = target_place(self.AUTO_SMALL_BASE, placed_small, "small")
-                else:
-                    place_xyz = target_place(self.AUTO_LARGE_BASE, placed_large, "large")
-
-                # execute pick & place
-                self.status_message = f"Auto L{level}: pick {size} {color}"
-                ok_pick = self._pick_xyzyaw(pick_item["xyz"], pick_item["psi"])
-                if not ok_pick:
-                    # failed pick, refresh and continue
-                    if level >= 3:
-                        smalls, larges = detect_candidates()
-                    continue
-
-                self.status_message = f"Auto L{level}: place {size} {color}"
-                ok_place = self._place_xyzyaw(place_xyz, pick_item["psi"])
-                if not ok_place:
-                    # ensure open
-                    self.rxarm.gripper.release()
-                    time.sleep(0.2)
-
-                # update counters if we intended to place in tower
-                if size == "small":
-                    placed_small += 1
-                else:
-                    placed_large += 1
-
-            self.status_message = f"Auto L{level}: done in {time.time()-t0:.1f}s (small={placed_small}, large={placed_large})"
-            self.next_state = "idle"
+        self.status_message = f"Auto L{level}: done in {time.time()-t0:.1f}s"
+        self.next_state = "idle"
 
 
 

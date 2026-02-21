@@ -108,7 +108,8 @@ class RXArm(InterbotixManipulatorXS):
         self.enable_torque()
         self.moving_time = 2.0
         self.accel_time = 0.5
-        self.arm.go_to_home_pose(moving_time=self.moving_time,
+        self.arm.go_to_home_pose(
+                             moving_time=self.moving_time,
                              accel_time=self.accel_time,
                              blocking=False)
         self.gripper.release()

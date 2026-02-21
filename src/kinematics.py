@@ -518,7 +518,7 @@ def IK_geometric(pose, block_angle_deg):
         theta5 = 0.0
     else:
         #TO BE FIXED
-        theta5 = (np.pi/2 + block_angle_rad - theta1)
+        theta5 = (block_angle_rad + theta1)
         theta5 = clamp(theta5)
 
         print(f"[WRIST DEBUG] === compute_wrist_roll ===")
