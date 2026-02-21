@@ -160,8 +160,9 @@ class StateMachine():
 
     def goto_observe_pose(self, wait=1.2):
         # raise arm to avoid blocking camera; tune (x,y,z) if needed
-        pose6 = self._topdown_pose6(0.0, 260.0, 250.0, 0.0)
-        self._move_pose6(pose6, wait=wait)
+        q= np.array([0.0, 0.0, -1.57, 0.0, 0.0])
+        self.rxarm.set_positions(q)
+        time.sleep(wait)
 
     # ---------------------------
     # perception helpers
@@ -279,9 +280,10 @@ class StateMachine():
                 return sz, c, lst[0]
         return None, None, None
 
-    def auto_sort_stack(self, level=2):
+    def auto_sort_stack(self, level=3):
         self.current_state = f"auto_L{level}"
         t0 = time.time()
+        self.goto_observe_pose(wait=2.0)
 
         # reset memory
         self.tower_h = {"s": 0.0, "l": 0.0}
@@ -290,11 +292,12 @@ class StateMachine():
         do_stack = (level >= 2)
         cached_block_dict = None
        
-        cached_block_dict = self._build_block_dict(level)
+
         Z_TWO_HIGH = 55.0
         dump_i = 0
 
         if level >= 3:
+            cached_block_dict = self._build_block_dict(level)
             highs = []
             for sz in ["s", "l"]:
                 for c in self.COLOR_ORDER:
@@ -337,7 +340,7 @@ class StateMachine():
 
 
 
-            cached_block_dict = self._build_block_dict(level)
+        cached_block_dict = self._build_block_dict(level)
 
 
 
