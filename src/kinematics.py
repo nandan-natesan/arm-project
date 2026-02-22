@@ -422,14 +422,10 @@ def compute_wrist_roll(theta1, block_angle_deg):
 def IK_geometric(pose, block_angle_deg):
     """!
     @brief      Produce joint configurations for provided pose
-
                 Converts a desired end-effector pose vector as np.array to joint angles. Determines if tool down or flat is required based on reachability arc
-
     @param      pose       The desired pose vector as np.array [x, y, z]
-
     @return     Joint configuration in a numpy array 1x4 where each col is a joint angle
     """
-
     # geometry
     l1_nom = 103.91
     l1_bias = 1.5
@@ -438,13 +434,13 @@ def IK_geometric(pose, block_angle_deg):
     l3 = 200.0
     l4 = 174.15
 
-    # psi candidates for tool down or tool 45
+    # psi candidates for tool down or tool flat
     psi_down = -np.pi/2
     psi_flat = 0.0
+    psi = psi_down  # set default
 
-    # block angle conversion to rad
+    # block angle
     block_angle_rad = np.deg2rad(block_angle_deg)
-
     #extract x, y, z from pose
     x_p, y_p, z_p = float(pose[0]), float(pose[1]), float(pose[2])
 
@@ -463,28 +459,24 @@ def IK_geometric(pose, block_angle_deg):
     rmax_nom = (l2 + l3)
     rmax_tol = 5
     rmax = rmax_nom - rmax_tol
-
     # Tool-down wrist center + outer reach
     x_wc_down = x0 - l4 * np.cos(psi_down)
     y_wc_down = y0 - l4 * np.sin(psi_down)
     l_wc_down = np.hypot(x_wc_down, y_wc_down)
 
-    # Select psi based on whether wrist center is within rmax of the shoulder or if z is high (which also requires tool down)
-    # change height transition accordingly
-    height_transition = 100
-    if l_wc_down <= rmax + 1e-6 or z_p <= height_transition + 1e-6:
-         psi = psi_down
+    # check if reach is within the tool-down arc and pose height to set psi
+    # z pose limit will need tuning, or add further checks to segment out psi accordingly
+    if l_wc_down >= rmax + 1e-6:
+        psi = psi_flat
     else:
-         psi = psi_flat
+        psi = psi_down
 
     # ----------------------------
     # IK solve for chosen psi
     # ----------------------------
-
     # wrist center
     x_wc = x0 - l4 * np.cos(psi)
     y_wc = y0 - l4 * np.sin(psi)
-
     # reach
     l_wc2 = x_wc**2 + y_wc**2
     l_wc = np.sqrt(l_wc2)
@@ -500,7 +492,6 @@ def IK_geometric(pose, block_angle_deg):
     # elbow-up branch
     s = np.sqrt(max(0.0, 1.0 - c*c))
     alpha = np.arctan2(s, c)
-
     gamma1 = np.arctan2(y_wc, x_wc)
     gamma2 = np.arctan2(l3*np.sin(alpha), l2 + l3*np.cos(alpha))
 
@@ -664,6 +655,49 @@ def find_feasible_ik(pose, block_angle_deg=0.0, preferred_psi=-np.pi/2):
                 return q, psi
 
     return None, None
+
+
+def compute_best_psi(xyz):
+    """
+    Find the psi closest to -pi/2 (straight down) that produces a fully
+    valid IK solution (reachable AND within joint limits).
+    Returns psi in [-pi/2, 0], or None if nothing works.
+    """
+    xyz = np.asarray(xyz, dtype=float)
+    psi_candidates = np.linspace(-np.pi / 2, 0.0, 30)
+    for psi in psi_candidates:
+        for elbow_up in [True, False]:
+            q = IK_geometric_stack(xyz, psi, 0.0, elbow_up)
+            if q is not None and check_joint_limits(q):
+                return psi
+    return None
+
+
+def compute_paired_psi(xyz_high, xyz_low):
+    """
+    Find the most vertical psi that gives a valid IK for BOTH points.
+    Ensures approach and place use the same arm configuration so the
+    descent is smooth with no wrist pitch change.
+    """
+    xyz_high = np.asarray(xyz_high, dtype=float)
+    xyz_low = np.asarray(xyz_low, dtype=float)
+    psi_candidates = np.linspace(-np.pi / 2, 0.0, 30)
+    for psi in psi_candidates:
+        ok_h = False
+        ok_l = False
+        for elbow_up in [True, False]:
+            q = IK_geometric_stack(xyz_high, psi, 0.0, elbow_up)
+            if q is not None and check_joint_limits(q):
+                ok_h = True
+                break
+        for elbow_up in [True, False]:
+            q = IK_geometric_stack(xyz_low, psi, 0.0, elbow_up)
+            if q is not None and check_joint_limits(q):
+                ok_l = True
+                break
+        if ok_h and ok_l:
+            return psi
+    return None
 
 
 # def IK_geometric(dh_params, pose):

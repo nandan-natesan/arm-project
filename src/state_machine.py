@@ -7,7 +7,7 @@ import numpy as np
 import rclpy
 import cv2
 from cv_bridge import CvBridge
-from kinematics import IK_geometric, FK_dh, compute_wrist_roll, IK_geometric_stack, find_feasible_ik, check_joint_limits
+from kinematics import IK_geometric, FK_dh, compute_wrist_roll, IK_geometric_stack, find_feasible_ik, check_joint_limits, compute_best_psi, compute_paired_psi
 class StateMachine():
     """!
     @brief      This class describes a state machine.
@@ -130,9 +130,8 @@ class StateMachine():
             self.auto_sort_stack(level=2)
         if self.next_state == "auto_L3":
             self.auto_sort_stack(level=3)
-        if self.next_state == "event_2":
-            self.event_2()
-
+        if self.next_state == "challenge_two":
+            self.challenge_two()
 
         if self.next_state =="challenge_three":
             self.challenge_three()
@@ -574,7 +573,7 @@ class StateMachine():
                 [0, 0, 174.15, 0]], dtype=float)
 
             # IK/FK checker
-            q = IK_geometric(pose_world[:3])
+            q = IK_geometric(pose_world[:3], 0.0)
             q = np.asarray(q, dtype=float).reshape(-1)
             print(f"IK solution: {q}")
             T = FK_dh(params, q, link=5)
@@ -598,12 +597,12 @@ class StateMachine():
                     [0, 0, 174.15, 0]], dtype=float)
                 T_target = FK_dh(params, q, link=5)
                 T_target[2,3] += self.z_grab_threshold
-                q = IK_geometric(T_target[:3,3])
+                q = IK_geometric(T_target[:3,3], 0.0)
                 self.rxarm.set_positions(q)
 
                 time.sleep(3.0)
                 pose_world[2] -= (self.z_grab_threshold + 10)  # descend to just above surface
-                q_descend = IK_geometric(pose_world[:3])
+                q_descend = IK_geometric(pose_world[:3], 0.0)
                 q_descend = np.asarray(q_descend, dtype=float).reshape(-1)
                 self.rxarm.set_positions(q_descend)
                 time.sleep(3.0)
@@ -624,7 +623,7 @@ class StateMachine():
                 pose_world[2] += self.z_grab_threshold + 40
                 self.drop_height = pose_world[2]
 
-                q_retreat = IK_geometric(pose_world[:3])
+                q_retreat = IK_geometric(pose_world[:3], 0.0)
                 q_retreat = np.asarray(q_retreat, dtype=float).reshape(-1)
                 self.rxarm.set_positions(q_retreat)
                 time.sleep(1.0)
@@ -643,13 +642,13 @@ class StateMachine():
                     [0, 0, 174.15, 0]], dtype=float)
                 T_target = FK_dh(params, q, link=5)
                 T_target[2,3] = self.drop_height
-                q_drop = IK_geometric(T_target[:3,3])
+                q_drop = IK_geometric(T_target[:3,3], 0.0)
                 q_drop = np.asarray(q_drop, dtype=float).reshape(-1)
 
                 self.rxarm.set_positions(q_drop)
                 time.sleep(2.0)
                 pose_world[2] += 20
-                q_descend = IK_geometric(pose_world[:3])
+                q_descend = IK_geometric(pose_world[:3], 0.0)
                 q_descend = np.asarray(q_descend, dtype=float).reshape(-1)
                 self.rxarm.set_positions(q_descend)
                 time.sleep(2.0)
@@ -863,7 +862,7 @@ class StateMachine():
         print(f"  action: {action}")
         print(f"  target pose: {p_mm}")
 
-        q_hat = IK_geometric(p_mm)
+        q_hat = IK_geometric(p_mm, 0.0)
         if q_hat is None:
             print("  Unreachable")
             self.next_state = "idle"
@@ -882,7 +881,7 @@ class StateMachine():
 
         # motion function
         def goto_xyz_mm(xyz_mm, label=""):
-            q = IK_geometric(xyz_mm)
+            q = IK_geometric(xyz_mm, 0.0)
             if q is None:
                 print(f"Unreachable for {label} xyz_mm={xyz_mm}")
                 return False
@@ -1013,332 +1012,349 @@ class StateMachine():
         self.next_state = "idle"
         time.sleep(5)
 
-    def challenge_three(self):
+    def challenge_two(self):
+        """Event 2: Arrange blocks in rainbow color order horizontal lines."""
+        self.current_state = "challenge_two"
+        self.status_message = "Challenge 2: Starting..."
 
-        """Stack large blocks as high as possible at a fixed world location."""
+        COLORS = ["red", "orange", "yellow", "green", "blue", "purple"]
 
-        self.current_state = "challenge_three"
+        LARGE_LINE_Y = 175.0
+        SMALL_LINE_Y = 275.0
+        LINE_X_START = -137.5
+        LINE_SPACING = 55.0
+        PLACE_Z = 20.0
 
-        self.status_message = "Challenge 3: Starting..."
+        SIZE_THRESH = 1200.0
 
-        # ── Tunable constants ──
+        PICK_CLEARANCE = 60.0
+        GRIP_OFFSET = 15.0
 
-        BLOCK_HEIGHT     = 38.0     # large block height in mm (measure and adjust)
+        MT_FAST = 2.0;  AT_FAST = 0.5
+        MT_SLOW = 3.0;  AT_SLOW = 1.0
 
-        STACK_X          = 0.0      # world X of stack center (mm)
+        TIMEOUT = 580.0
+        SETTLE = 1.5
+        MAX_PASSES = 3
+        SCAN_Q = np.array([0.0, 0.0, -1.57, 0.0, 0.0])
 
-        STACK_Y          = 225.0    # world Y of stack center (mm)
+        t0 = time.time()
+        placed_targets = []
 
-        APPROACH_CLEARANCE = 80.0   # mm above target for approach waypoint
-
-        GRIP_OFFSET      = 15.0     # mm below z_top for pick grip center
-
-        PLACE_OFFSET     = 5.0      # mm above stack top when releasing
-
-        STACK_PROXIMITY  = 60.0     # mm — ignore detected blocks this close to stack
-
-        MOVE_TIME_FAST   = 1.5      # seconds for large moves
-
-        MOVE_TIME_SLOW   = 1.2      # seconds for short approach/descend
-
-        ACCEL_TIME       = 0.4
-
-        SETTLE_TIME      = 1.0      # seconds to wait after moving to scan pose
-
-        MAX_BLOCKS       = 20       # safety cap
-
-        TIMEOUT          = 580.0    # seconds (keep 20s buffer from 600s limit)
-
-        # scan pose: arm pointing up, out of camera view
-
-        SCAN_POSE = np.array([0.0, 0.0, -1.57, 0.0, 0.0])
-
-        blocks_stacked = 0
-
-        start_time = time.time()
-
-        def elapsed():
-
-            return time.time() - start_time
-
-        def move(q, mt=MOVE_TIME_FAST):
-
+        def mv(q, mt=MT_FAST, at=AT_FAST):
             self.rxarm.set_moving_time(mt)
-
-            self.rxarm.set_accel_time(ACCEL_TIME)
-
+            self.rxarm.set_accel_time(at)
             self.rxarm.set_positions(np.asarray(q, dtype=float).reshape(-1))
+            time.sleep(mt + 0.4)
 
-            time.sleep(mt + 0.3)
-
-        def goto_xyz(xyz, block_angle=0.0, pref_psi=-np.pi/2, mt=MOVE_TIME_FAST):
-
-            q, psi = find_feasible_ik(xyz, block_angle, pref_psi)
-
+        def go_auto(xyz, ba=0.0, mt=MT_FAST, at=AT_FAST):
+            q, psi = find_feasible_ik(xyz, ba, -np.pi / 2)
             if q is None:
+                print(f"[C2] UNREACHABLE: {xyz}")
+                return False
+            mv(q, mt, at)
+            return True
 
-                print(f"[C3] UNREACHABLE: {xyz}, pref_psi={pref_psi:.2f}")
+        def go_place(xyz, mt=MT_FAST, at=AT_FAST):
+            q = IK_geometric(np.asarray(xyz, dtype=float), 0.0)
+            if q is None:
+                print(f"[C2] UNREACHABLE place: {xyz}")
+                return False
+            mv(q, mt, at)
+            return True
 
-                return False, None
+        schedule = []
+        for i, color in enumerate(COLORS):
+            x = LINE_X_START + i * LINE_SPACING
+            schedule.append(("large", color, x, LARGE_LINE_Y))
+        for i, color in enumerate(COLORS):
+            x = LINE_X_START + i * LINE_SPACING
+            schedule.append(("small", color, x, SMALL_LINE_Y))
 
-            move(q, mt)
+        remaining = set(range(len(schedule)))
+        n_placed = 0
+        passes_without_progress = 0
 
-            return True, psi
+        while remaining and (time.time() - t0) < TIMEOUT and passes_without_progress < MAX_PASSES:
+            progress_this_pass = False
 
-        while blocks_stacked < MAX_BLOCKS and elapsed() < TIMEOUT:
-
-            self.status_message = f"C3: Stacked {blocks_stacked} — scanning..."
-
-            # ─── 1. Move to scan position ───
-
-            move(SCAN_POSE, MOVE_TIME_FAST)
-
-            time.sleep(SETTLE_TIME)
-
-            # ─── 2. Read detected blocks ───
-
-            detections = getattr(self.camera, 'block_detections', None)
-
-            if not detections or len(detections) == 0:
-
-                print("[C3] No blocks detected, retrying...")
-
-                time.sleep(1.0)
-
-                detections = getattr(self.camera, 'block_detections', None)
-
-                if not detections or len(detections) == 0:
-
-                    print("[C3] Still no blocks. Done.")
-
+            for idx in sorted(remaining):
+                if (time.time() - t0) > TIMEOUT:
                     break
 
-            # ─── 3. Filter out blocks near the stack ───
+                size_label, target_color, target_x, target_y = schedule[idx]
+                self.status_message = f"C2: {n_placed} placed — {target_color} {size_label}"
 
-            candidates = []
+                mv(SCAN_Q)
+                time.sleep(SETTLE)
 
-            for blk in detections:
-
-                cx, cy = blk['center_px']
-
-                w_pos = self.camera.pixel_to_world(cx, cy)
-
-                if w_pos is None:
-
+                dets = getattr(self.camera, 'block_detections', None)
+                if not dets or len(dets) == 0:
+                    time.sleep(1.0)
+                    dets = getattr(self.camera, 'block_detections', None)
+                if not dets or len(dets) == 0:
                     continue
 
-                w_pos = np.asarray(w_pos, dtype=float).ravel()
+                best = None
+                best_dist = 1e9
+                for b in dets:
+                    if b.get('color', '').lower() != target_color:
+                        continue
+                    rect_area = float(b.get('rect_area', 0.0))
+                    is_large = rect_area >= SIZE_THRESH
+                    if size_label == "large" and not is_large:
+                        continue
+                    if size_label == "small" and is_large:
+                        continue
 
-                dist_to_stack = np.hypot(w_pos[0] - STACK_X, w_pos[1] - STACK_Y)
+                    cx, cy = b['center_px']
+                    w = self.camera.pixel_to_world(int(cx), int(cy))
+                    if w is None:
+                        continue
+                    w = np.asarray(w, dtype=float).ravel()
 
-                if dist_to_stack < STACK_PROXIMITY:
+                    near_placed = False
+                    for px, py in placed_targets:
+                        if np.hypot(w[0] - px, w[1] - py) < 40.0:
+                            near_placed = True
+                            break
+                    if near_placed:
+                        continue
 
+                    d = np.hypot(w[0], w[1])
+                    if d < best_dist:
+                        best_dist = d
+                        best = (b, w)
+
+                if best is None:
+                    print(f"[C2] No {target_color} {size_label} found (will retry)")
                     continue
 
-                candidates.append((blk, w_pos))
+                blk, pw = best
+                ang = float(blk.get('angle_deg', 0.0))
+                print(f"[C2] Picking {target_color} {size_label} at "
+                      f"({pw[0]:.1f}, {pw[1]:.1f}, {pw[2]:.1f}) ang={ang:.1f}")
 
-            if not candidates:
+                # ── PICK ──
+                self.rxarm.gripper.release()
+                time.sleep(0.3)
 
-                print("[C3] No pickable blocks (all near stack or none). Done.")
+                if not go_auto([pw[0], pw[1], pw[2] + PICK_CLEARANCE], ang):
+                    continue
+                if not go_auto([pw[0], pw[1], pw[2] - GRIP_OFFSET], ang, MT_SLOW, AT_SLOW):
+                    continue
 
+                self.rxarm.gripper.grasp()
+                time.sleep(0.5)
+
+                go_auto([pw[0], pw[1], pw[2] + PICK_CLEARANCE], ang)
+
+                # ── PLACE (smooth descent, straight orientation) ──
+                mv(SCAN_Q)
+
+                if not go_place([target_x, target_y, PLACE_Z + PICK_CLEARANCE]):
+                    self.rxarm.gripper.release()
+                    time.sleep(0.3)
+                    continue
+                if not go_place([target_x, target_y, PLACE_Z], MT_SLOW, AT_SLOW):
+                    self.rxarm.gripper.release()
+                    time.sleep(0.3)
+                    continue
+
+                self.rxarm.gripper.release()
+                time.sleep(0.5)
+
+                go_place([target_x, target_y, PLACE_Z + PICK_CLEARANCE])
+
+                placed_targets.append((target_x, target_y))
+                remaining.discard(idx)
+                n_placed += 1
+                progress_this_pass = True
+                print(f"[C2] Placed {target_color} {size_label} at "
+                      f"({target_x:.0f}, {target_y:.0f}). #{n_placed} done. "
+                      f"Elapsed: {time.time()-t0:.1f}s")
+
+            if progress_this_pass:
+                passes_without_progress = 0
+            else:
+                passes_without_progress += 1
+                print(f"[C2] No progress this pass ({passes_without_progress}/{MAX_PASSES})")
+
+        mv(SCAN_Q)
+        if remaining:
+            missed = [(schedule[i][1], schedule[i][0]) for i in sorted(remaining)]
+            print(f"[C2] Could not find: {missed}")
+        self.status_message = f"C2: Done! {n_placed} blocks in {time.time()-t0:.1f}s"
+        print(self.status_message)
+        self.next_state = "idle"
+
+    def challenge_three(self):
+        """Stack large blocks as high as possible at a fixed world location."""
+        self.current_state = "challenge_three"
+        self.status_message = "Challenge 3: Starting..."
+
+        BLOCK_HEIGHT    = 35.0
+        STACK_X         = 0.0
+        STACK_Y         = 225.0
+        PICK_CLEARANCE  = 60.0
+        GRIP_OFFSET     = 15.0
+        STACK_PROXIMITY = 60.0
+
+        SIDE_THR        = 6
+        SIDE_Y_BACK     = 80.0
+
+        MT_FAST  = 2.0;  AT_FAST  = 0.5
+        MT_PLACE = 2.5;  AT_PLACE = 0.8
+
+        SETTLE   = 1.0
+        MAX_BLK  = 20
+        TIMEOUT  = 580.0
+        SCAN_Q   = np.array([0.0, 0.0, -1.57, 0.0, 0.0])
+
+        n = 0
+        t0 = time.time()
+
+        def mv(q, mt=MT_FAST, at=AT_FAST):
+            self.rxarm.set_moving_time(mt)
+            self.rxarm.set_accel_time(at)
+            self.rxarm.set_positions(np.asarray(q, dtype=float).reshape(-1))
+            time.sleep(mt + 0.4)
+
+        def go_psi(xyz, psi, ba=0.0, mt=MT_FAST, at=AT_FAST):
+            for eu in [True, False]:
+                q = IK_geometric_stack(np.asarray(xyz, dtype=float), psi, ba, eu)
+                if q is not None and check_joint_limits(q):
+                    mv(q, mt, at)
+                    return True
+            print(f"[C3] UNREACHABLE psi={np.rad2deg(psi):.1f}: {xyz}")
+            return False
+
+        def go_auto(xyz, ba=0.0, mt=MT_FAST, at=AT_FAST):
+            q, psi = find_feasible_ik(xyz, ba, -np.pi / 2)
+            if q is None:
+                print(f"[C3] UNREACHABLE auto: {xyz}")
+                return False, None
+            mv(q, mt, at)
+            return True, psi
+
+        while n < MAX_BLK and (time.time() - t0) < TIMEOUT:
+            self.status_message = f"C3: {n} stacked - scanning..."
+
+            mv(SCAN_Q)
+            time.sleep(SETTLE)
+
+            dets = getattr(self.camera, 'block_detections', None)
+            if not dets or len(dets) == 0:
+                time.sleep(1.0)
+                dets = getattr(self.camera, 'block_detections', None)
+                if not dets or len(dets) == 0:
+                    break
+
+            cands = []
+            for b in dets:
+                cx, cy = b['center_px']
+                w = self.camera.pixel_to_world(cx, cy)
+                if w is None:
+                    continue
+                w = np.asarray(w, dtype=float).ravel()
+                if np.hypot(w[0] - STACK_X, w[1] - STACK_Y) < STACK_PROXIMITY:
+                    continue
+                cands.append((b, w))
+            if not cands:
                 break
 
-            # pick the block closest to the arm base (easiest reach)
+            cands.sort(key=lambda c: np.hypot(c[1][0], c[1][1]))
+            blk, pw = cands[0]
+            ang = blk.get('angle_deg', 0.0)
 
-            candidates.sort(key=lambda c: np.hypot(c[1][0], c[1][1]))
-
-            chosen_blk, pick_world = candidates[0]
-
-            angle_deg = chosen_blk.get('angle_deg', 0.0)
-
-            pick_z = pick_world[2]
-
-            print(f"[C3] Picking block at world ({pick_world[0]:.1f}, {pick_world[1]:.1f}, {pick_z:.1f}), angle={angle_deg:.1f}°")
-
-            self.status_message = f"C3: Picking block #{blocks_stacked+1}..."
-
-            # ─── 4. PICK: approach → descend → grasp → retreat ───
+            print(f"[C3] Pick ({pw[0]:.1f}, {pw[1]:.1f}, {pw[2]:.1f}) ang={ang:.1f}")
 
             self.rxarm.gripper.release()
-
             time.sleep(0.3)
 
-            # approach above block (tool-down)
-
-            approach_pick = np.array([pick_world[0], pick_world[1], pick_z + APPROACH_CLEARANCE])
-
-            ok, _ = goto_xyz(approach_pick, angle_deg, -np.pi/2, MOVE_TIME_FAST)
-
+            ok, _ = go_auto([pw[0], pw[1], pw[2] + PICK_CLEARANCE], ang)
             if not ok:
-
-                print("[C3] Can't reach pick approach, skipping block")
-
                 continue
-
-            # descend to grip
-
-            descend_pick = np.array([pick_world[0], pick_world[1], pick_z - GRIP_OFFSET])
-
-            ok, _ = goto_xyz(descend_pick, angle_deg, -np.pi/2, MOVE_TIME_SLOW)
-
+            ok, _ = go_auto([pw[0], pw[1], pw[2] - GRIP_OFFSET], ang, MT_PLACE, AT_PLACE)
             if not ok:
-
-                print("[C3] Can't reach pick descend, skipping block")
-
                 continue
 
             self.rxarm.gripper.grasp()
-
             time.sleep(0.5)
+            go_auto([pw[0], pw[1], pw[2] + PICK_CLEARANCE], ang)
 
-            # retreat
+            # ── PLACE ──
+            stack_z   = n * BLOCK_HEIGHT
+            rel_off   = 15.0 + n * 2.0
+            release_z = stack_z + rel_off
 
-            goto_xyz(approach_pick, angle_deg, -np.pi/2, MOVE_TIME_SLOW)
+            mv(SCAN_Q)
 
-            # ─── 5. PLACE: transit → approach stack → descend → release → retreat ───
+            if n < SIDE_THR:
+                clearance  = PICK_CLEARANCE
+                approach_z = release_z + clearance
+                app_pt = np.array([STACK_X, STACK_Y, approach_z])
+                rel_pt = np.array([STACK_X, STACK_Y, release_z])
 
-            stack_z = blocks_stacked * BLOCK_HEIGHT
+                psi = compute_paired_psi(app_pt, rel_pt)
+                if psi is None:
+                    psi = compute_best_psi(rel_pt)
+                if psi is None:
+                    print(f"[C3] #{n+1} No feasible psi. Stopping.")
+                    self.rxarm.gripper.release()
+                    break
 
-            place_z = stack_z + PLACE_OFFSET
+                print(f"[C3] #{n+1} ABOVE stack_z={stack_z:.0f} rel_z={release_z:.0f} "
+                      f"app_z={approach_z:.0f} psi={np.rad2deg(psi):.1f}")
 
-            self.status_message = f"C3: Placing block #{blocks_stacked+1} at z={place_z:.0f}mm..."
-
-            # transit to scan pose first to avoid sweeping over the workspace
-
-            move(SCAN_POSE, MOVE_TIME_FAST)
-
-            # approach above stack
-
-            approach_stack = np.array([STACK_X, STACK_Y, place_z + APPROACH_CLEARANCE])
-
-            ok, used_psi = goto_xyz(approach_stack, 0.0, -np.pi/2, MOVE_TIME_FAST)
-
-            if not ok:
-
-                print(f"[C3] Can't reach stack approach at z={place_z + APPROACH_CLEARANCE:.0f}. Dropping block and stopping.")
-
-                self.rxarm.gripper.release()
-
-                break
-
-            # descend to place (use adaptive psi)
-
-            place_target = np.array([STACK_X, STACK_Y, place_z])
-
-            ok, used_psi = goto_xyz(place_target, 0.0, -np.pi/2, MOVE_TIME_SLOW)
-
-            if not ok:
-
-                print(f"[C3] Can't reach place target z={place_z:.0f}. Dropping block and stopping.")
+                if not go_psi(app_pt, psi):
+                    self.rxarm.gripper.release(); break
+                if not go_psi(rel_pt, psi, 0.0, MT_PLACE, AT_PLACE):
+                    self.rxarm.gripper.release(); break
 
                 self.rxarm.gripper.release()
+                time.sleep(0.15)
+                go_psi(app_pt, psi)
 
-                break
+            else:
+                hover_above = 15.0
+                hover_z  = release_z + hover_above
+                over_pt  = np.array([STACK_X, STACK_Y, hover_z])
+                rel_pt   = np.array([STACK_X, STACK_Y, release_z])
+                side_pt  = np.array([STACK_X, STACK_Y - SIDE_Y_BACK, hover_z])
 
-            print(f"[C3] Placing with psi={np.rad2deg(used_psi):.1f}° at z={place_z:.0f}mm")
+                psi = compute_paired_psi(over_pt, rel_pt)
+                if psi is None:
+                    psi = compute_best_psi(rel_pt)
+                if psi is None:
+                    print(f"[C3] #{n+1} No feasible psi (side). Stopping.")
+                    self.rxarm.gripper.release()
+                    break
 
-            self.rxarm.gripper.release()
+                print(f"[C3] #{n+1} SIDE stack_z={stack_z:.0f} rel_z={release_z:.0f} "
+                      f"hover_z={hover_z:.0f} psi={np.rad2deg(psi):.1f}")
 
-            time.sleep(0.4)
+                if not go_psi(side_pt, psi):
+                    self.rxarm.gripper.release(); break
+                if not go_psi(over_pt, psi, 0.0, MT_PLACE, AT_PLACE):
+                    self.rxarm.gripper.release(); break
+                if not go_psi(rel_pt, psi, 0.0, MT_PLACE, AT_PLACE):
+                    self.rxarm.gripper.release(); break
 
-            # retreat above stack
+                self.rxarm.gripper.release()
+                time.sleep(0.15)
+                go_psi(over_pt, psi)
+                go_psi(side_pt, psi)
 
-            goto_xyz(approach_stack, 0.0, -np.pi/2, MOVE_TIME_SLOW)
+            n += 1
+            print(f"[C3] Block #{n} placed. Elapsed: {time.time()-t0:.1f}s")
 
-            blocks_stacked += 1
-
-            print(f"[C3] ✓ Block #{blocks_stacked} placed. Elapsed: {elapsed():.1f}s")
-
-        # ─── Done ───
-
-        move(SCAN_POSE, MOVE_TIME_FAST)
-
-        self.status_message = f"C3: Done! Stacked {blocks_stacked} blocks in {elapsed():.1f}s"
-
+        mv(SCAN_Q)
+        self.status_message = f"C3: Done! {n} blocks in {time.time()-t0:.1f}s"
         print(self.status_message)
-
         self.next_state = "idle"
 
 
-    def event_2(self):
-            block_detections = self.camera.block_detections
-
-            # Catch for no block detections
-            if block_detections is None or block_detections == 0:
-                self.status_message = "No blocks detected"
-                self.next_state = "idle"
-                return
-
-            # set allowable colours and create empty lists for small and large blocks
-            colours = ["red","orange","yellow","green","blue","purple"]
-            small_blocks, large_blocks = [], []
-
-            # assign block sizes
-            for block in block_detections:
-                # ignore any block not in color scope
-                if block["color"] not in colours:
-                    continue
-                # convert block center point to world point
-                # convert block orientation to rad
-                world = self.camera.pixel_to_world(block["center_px"])
-                block["xyz"] = np.array(world[:3])
-                block["psi"] = np.deg2rad(block["angle_deg"])
-
-                # sort into large and small
-                # PHYSICAL TUNING REQUIRED
-                if block["area"] <= 800:
-                    small_blocks.append(block)
-                else:
-                    large_blocks.append(block)
-
-            # sort small and large blocks by colour
-            small_blocks = sorted(small_blocks, key=lambda x: colours.index(x["color"]))
-            large_blocks = sorted(large_blocks, key=lambda x: colours.index(x["color"]))
-
-            def pick_block(pick_position, block_orientation):
-                # SAFETY OFFSETS
-                approach_height = 50
-                grip_offset = 15
-                approach_target = pick_position[2] + approach_height
-                grip_target = pick_position[2] - grip_offset
-                IK_geometric(approach_target, block_orientation)
-                time.sleep(1)
-                IK_geometric(grip_target, block_orientation)
-                self.rxarm.gripper.grasp()
-
-            def move_block(from_position, to_position):
-                # SAFETY OFFSETS
-                move_height = 150
-                IK_geometric(from_position[2] + move_height, 0.0)
-                time.sleep(1)
-                IK_geometric(to_position[2] + move_height, 0.0)
-
-            def place_block(place_position, block_orientation):
-                # SAFETY OFFSETS
-                approach_height = 50
-                drop_offset = 20
-                approach_target = place_position[2] + approach_height
-                drop_target = place_position[2] + drop_offset
-                IK_geometric(approach_target, block_orientation)
-                time.sleep(1)
-                IK_geometric(drop_target, block_orientation)
-                self.rxarm.gripper.release()
-
-            # ---- PLACE LARGE LINE ----
-            for i, block in enumerate(large_blocks):
-                target = np.array([-175 + i*50, 250, 0])
-                pick_block(block["xyz"], block["psi"])
-                move_block(block["xyz"], target)
-                place_block(target, 0.0)
-
-            # ---- PLACE SMALL LINE ----
-            for i, block in enumerate(small_blocks):
-                target = np.array([-175 + i*50, 175, 0])
-                pick_block(block["xyz"], block["psi"])
-                move_block(block["xyz"], target)
-                place_block(target, 0.0)
-
-            self.next_state = "idle"
 
 
 class StateMachineThread(QThread):

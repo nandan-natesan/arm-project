@@ -132,8 +132,8 @@ class Gui(QMainWindow):
         self.ui.btnUser9.clicked.connect(partial(nxt_if_arm_init, 'test_wrist_align'))
         self.ui.btnUser10.setText("Auto L3")
         self.ui.btnUser10.clicked.connect(lambda: self.sm.set_next_state("auto_L3"))
-        self.ui.btnUser11.setText("Event 2")
-        self.ui.btnUser11.clicked.connect(lambda: self.sm.set_next_state("event_2"))
+        self.ui.btnUser11.setText("Challenge 2")
+        self.ui.btnUser11.clicked.connect(partial(nxt_if_arm_init, "challenge_two"))
         self.ui.btnUser12.setText("Challenge 3")
         self.ui.btnUser12.clicked.connect(partial(nxt_if_arm_init, "challenge_three"))
         

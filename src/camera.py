@@ -361,7 +361,8 @@ class Camera():
          
                 # print("check!!!!",angle)
                 cx_i, cy_i = int(cx), int(cy)
-
+                cx_i += -3
+                cy_i += 3
                 cv2.drawContours(annotated, [hull], -1, color_boundary[c], 2)
                 cv2.circle(annotated, (cx_i, cy_i), 3, (0, 0, 0), -1)
                 cv2.putText(annotated, f"{c}", (cx_i - 20, cy_i - 12),
@@ -764,7 +765,16 @@ class Camera():
             pts = cv2.perspectiveTransform(pts,np.linalg.inv(self.H))
             p1 = int(pts[0,0,1])
             p2 = int(pts[0,0,0])
-            Zc = self.DepthFrameRaw[p1][p2]
+            # Zc = self.DepthFrameRaw[p1][p2]
+            # Replace the single-pixel lookup with:
+            half = 5
+            r0 = max(0, p1 - half)
+            r1 = min(self.DepthFrameRaw.shape[0], p1 + half + 1)
+            c0 = max(0, p2 - half)
+            c1 = min(self.DepthFrameRaw.shape[1], p2 + half + 1)
+            patch = self.DepthFrameRaw[r0:r1, c0:c1].astype(float)
+            valid = patch[patch > 0]
+            Zc = float(np.median(valid)) if len(valid) > 0 else float(self.DepthFrameRaw[p1][p2])
             # undistortPoints with P=I gives normalized points (x,y,1)
             undist = cv2.undistortPoints(pts, K, D, P=np.eye(3))
             x_norm, y_norm = undist[0,0,0], undist[0,0,1]
