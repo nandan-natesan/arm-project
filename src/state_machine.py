@@ -45,7 +45,7 @@ class StateMachine():
         # For click/grab task
         self.holding_object = False          # True after a successful pick, False after drop
         self.last_pick_mm = None             # stores last picked [x,y,z] in mm
-        self.z_grab_threshold = 15
+        self.z_grab_threshold = 50
         self.gripper_opened = True
         self.drop_height = None
         # ---------- Auto sort/stack parameters ----------
@@ -279,7 +279,7 @@ class StateMachine():
                 return sz, c, lst[0]
         return None, None, None
 
-    def auto_sort_stack(self, level=3):
+    def auto_sort_stack(self, level=1):
         self.current_state = f"auto_L{level}"
         t0 = time.time()
         self.goto_observe_pose(wait=2.0)
@@ -352,7 +352,7 @@ class StateMachine():
 
             # refresh detection every loop (L3 needs this; L1/L2 also fine)
             block_dict = cached_block_dict if cached_block_dict is not None else self._build_block_dict(level)
-
+            print(f"block_dict keys: {list(block_dict.keys())}")
             sz, c, cand = self._select_next_block_like_them(block_dict)
             # print(f"Next target: size={sz}, color={c}, candidate={cand}")
             if cand is None:
@@ -364,7 +364,6 @@ class StateMachine():
             # ---------- PICK ----------
             ho_pick, pick = self._pickup_targets(xyz, sz)
             # print(f"Pick targets: hover=({ho_pick[0]:.1f},{ho_pick[1]:.1f},{ho_pick[2]:.1f}), pick=({pick[0]:.1f},{pick[1]:.1f},{pick[2]:.1f}), angle={angle_deg:.1f}°")
-
             if not self._move_xyz(ho_pick, angle_deg, wait=1.0, slow=True,place=False):
                 continue
             if not self._move_xyz(pick, angle_deg, wait=2.0, slow=True,place =False):
@@ -583,9 +582,7 @@ class StateMachine():
             print("FK xyz:", p_fk)
             print("pos err (mm):", np.linalg.norm(p_fk - xyz))
 
-        
             # 1) Move to approach position (with z offset applied above)
-     
             if self.current_gripper_state == 'open':
                 # PICK: descend to surface, grasp, retreat
 
@@ -601,7 +598,7 @@ class StateMachine():
                 self.rxarm.set_positions(q)
 
                 time.sleep(3.0)
-                pose_world[2] -= (self.z_grab_threshold + 10)  # descend to just above surface
+                pose_world[2] += (20)  # descend to just above surface
                 q_descend = IK_geometric(pose_world[:3], 0.0)
                 q_descend = np.asarray(q_descend, dtype=float).reshape(-1)
                 self.rxarm.set_positions(q_descend)
@@ -672,9 +669,6 @@ class StateMachine():
 
         # Do NOT change next_state: staying in click_to_grab allows repeated clicks
         return
-
-
-
 
     def test_wrist_align(self):
         self.current_state = "test_wrist_align"
@@ -818,110 +812,6 @@ class StateMachine():
 
         self.next_state = "idle"
 
-
-    def click_to_grab2(self):
-        """
-        First click = PICK, second click = DROP (toggles using self.holding_object)
-
-        Assumptions:
-        - camera.world_cood(u,v) returns [x,y,z] in mm.
-        - IK_geometric expects [x,y,z] in mm.
-        - FK_dh(dh_params, q, link=5) returns mm translation (since dh_params are mm).
-        """
-
-        # decide action based on flag
-        action = "DROP" if getattr(self, "holding_object", False) else "PICK"
-
-        self.current_state = "click_to_grab"
-        if action == "PICK":
-            self.status_message = "Click location in workspace for block pickup"
-        else:
-            self.status_message = "Click location in workspace to drop block"
-
-        # read mouse click
-        # Latch click (consume exactly once)
-        u = int(self.camera.last_click[0])
-        v = int(self.camera.last_click[1])
-        p_mm = np.array(self.camera.pixel_to_world(u, v), dtype=float)  # [x,y,z] in mm
-        
-        #-------
-        # IK/FK checker - can delete once working
-        PARAMS = np.array(
-            [
-                [0.0,    1.570796327, 103.91,       0.0],
-                [205.73, 0.0,         0.0,          1.3342],
-                [200.0,  0.0,         0.0,         -1.3342],
-                [0.0,    1.570796327, 0.0,          1.570796327],
-                [0.0,    0.0,         174.15,       0.0],
-            ],
-            dtype=float,
-        )
-
-        print("\n---- Real click target FK/IK check ----")
-        print(f"\n mouse click (u,v)=({u}, {v})")
-        print(f"  action: {action}")
-        print(f"  target pose: {p_mm}")
-
-        q_hat = IK_geometric(p_mm, 0.0)
-        if q_hat is None:
-            print("  Unreachable")
-            self.next_state = "idle"
-            return
-
-        T_fk = FK_dh(PARAMS, q_hat, link=5)
-        p_hat_mm = T_fk[:3, 3].astype(float)
-
-        err_vec = p_hat_mm - p_mm
-        err = float(np.linalg.norm(err_vec))
-
-        print(f"  IK: {q_hat} ")
-        print(f"  FK: {p_hat_mm} ")
-        print(f"  error: {err_vec} ")
-        print(f"  ||error||: {err:.3f} ")
-
-        # motion function
-        def goto_xyz_mm(xyz_mm, label=""):
-            q = IK_geometric(xyz_mm, 0.0)
-            if q is None:
-                print(f"Unreachable for {label} xyz_mm={xyz_mm}")
-                return False
-            self.rxarm.set_positions(q)
-            return True
-
-        # motion
-        approach_mm = p_mm.copy()
-        approach_mm[2] += 75.0  # 75 mm above - change accordingly
-        descend_mm = p_mm.copy()
-        # safer default: don't go below table unless you intentionally want it
-        descend_mm[2] = p_mm[2]
-        if not goto_xyz_mm(approach_mm, label="approach(+75mm)"):
-            self.next_state = "idle"
-            return
-        time.sleep(1.2)
-
-        if not goto_xyz_mm(descend_mm, label="descend"):
-            self.next_state = "idle"
-            return
-        time.sleep(1.2)
-
-        if action == "PICK":
-            self.rxarm.gripper.grasp()
-            time.sleep(0.8)
-            self.holding_object = True
-            self.last_pick_mm = p_mm.copy()
-            self.status_message = "Picked. Click a drop location."
-        else:
-            self.rxarm.gripper.release()
-            time.sleep(0.8)
-            self.holding_object = False
-            self.last_pick_mm = None
-            self.status_message = "Dropped. Click a pickup location."
-
-        goto_xyz_mm(approach_mm, label="retreat(+75mm)")
-        time.sleep(1.2)
-
-        self.next_state = "idle"
-
     def calibrate(self):
         """
         Perform camera extrinsic calibration using AprilTag detections
@@ -1035,7 +925,8 @@ class StateMachine():
 
         TIMEOUT = 580.0
         SETTLE = 1.5
-        MAX_PASSES = 3
+        MAX_PASSES = 6
+        VERIFY_RADIUS = 45.0
         SCAN_Q = np.array([0.0, 0.0, -1.57, 0.0, 0.0])
 
         t0 = time.time()
@@ -1062,6 +953,60 @@ class StateMachine():
                 return False
             mv(q, mt, at)
             return True
+
+        def fresh_detections():
+            """Move to scan pose, trigger detection, return fresh block list."""
+            mv(SCAN_Q)
+            time.sleep(SETTLE)
+            self.camera.blockDetector()
+            time.sleep(0.5)
+            dets = getattr(self.camera, 'block_detections', None)
+            if not dets or len(dets) == 0:
+                time.sleep(1.0)
+                self.camera.blockDetector()
+                time.sleep(0.5)
+                dets = getattr(self.camera, 'block_detections', None)
+            return dets or []
+
+        def verify_placements():
+            """Re-scan and return indices of blocks missing from their target positions."""
+            dets = fresh_detections()
+            missing_indices = []
+            verified_targets = []
+
+            for idx in range(len(schedule)):
+                if idx in remaining:
+                    continue
+
+                size_label, target_color, target_x, target_y = schedule[idx]
+                found = False
+                for b in dets:
+                    if b.get('color', '').lower() != target_color:
+                        continue
+                    rect_area = float(b.get('rect_area', 0.0))
+                    is_large = rect_area >= SIZE_THRESH
+                    if size_label == "large" and not is_large:
+                        continue
+                    if size_label == "small" and is_large:
+                        continue
+                    cx, cy = b['center_px']
+                    w = self.camera.pixel_to_world(int(cx), int(cy))
+                    if w is None:
+                        continue
+                    w = np.asarray(w, dtype=float).ravel()
+                    if np.hypot(w[0] - target_x, w[1] - target_y) < VERIFY_RADIUS:
+                        found = True
+                        break
+
+                if found:
+                    verified_targets.append((target_x, target_y))
+                else:
+                    missing_indices.append(idx)
+                    tag = "*** ORANGE MISSING ***" if target_color == "orange" else "MISSING"
+                    print(f"[C2-VERIFY] {tag}: {target_color} {size_label} "
+                          f"at ({target_x:.0f}, {target_y:.0f}) — will retry")
+
+            return missing_indices, verified_targets
 
         schedule = []
         for i, color in enumerate(COLORS):
@@ -1149,7 +1094,7 @@ class StateMachine():
 
                 go_auto([pw[0], pw[1], pw[2] + PICK_CLEARANCE], ang)
 
-                # ── PLACE (smooth descent, straight orientation) ──
+                # ── PLACE ──
                 mv(SCAN_Q)
 
                 if not go_place([target_x, target_y, PLACE_Z + PICK_CLEARANCE]):
@@ -1173,6 +1118,17 @@ class StateMachine():
                 print(f"[C2] Placed {target_color} {size_label} at "
                       f"({target_x:.0f}, {target_y:.0f}). #{n_placed} done. "
                       f"Elapsed: {time.time()-t0:.1f}s")
+
+            # ── VERIFY: check all supposedly-placed blocks are actually there ──
+            if (time.time() - t0) < TIMEOUT:
+                missing_indices, verified_targets = verify_placements()
+                if missing_indices:
+                    for mi in missing_indices:
+                        remaining.add(mi)
+                    placed_targets = verified_targets
+                    n_placed = len(schedule) - len(remaining)
+                    print(f"[C2-VERIFY] Re-queued {len(missing_indices)} missing block(s). "
+                          f"{n_placed}/{len(schedule)} confirmed.")
 
             if progress_this_pass:
                 passes_without_progress = 0
@@ -1353,8 +1309,6 @@ class StateMachine():
         self.status_message = f"C3: Done! {n} blocks in {time.time()-t0:.1f}s"
         print(self.status_message)
         self.next_state = "idle"
-
-
 
 
 class StateMachineThread(QThread):

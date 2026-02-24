@@ -329,72 +329,6 @@ def to_s_matrix(w, v):
     pass
 
 
-def IK_geometric_v1(pose):
-    """!
-    @brief      Calculates joint angles for a desired end-effector pose
-    @param      pose       The desired pose vector as np.array [x, y, z] in world coords
-    @return     Joint configuration in a numpy array 4x1 where each col is angle for eaach joint
-    """
-
-    # geometry
-    l1 = 103.91
-    l2 = 205.73
-    l3 = 200.0
-    l4 = 174.15
-    psi = -np.pi/2  # fixed approach angle (down)
-
-    #extract x, y, z from pose
-    x_p, y_p, z_p = float(pose[0]), float(pose[1]), float(pose[2])
-
-    # base yaw/ theta1
-    theta1 = np.arctan2(-x_p, y_p)
-
-    # 2D RR planar coords at shoulder
-    x0 = np.hypot(x_p, y_p)
-    y0 = z_p - l1
-
-    # wrist center
-    x_wc = x0 - l4 * np.cos(psi)
-    y_wc = y0 - l4 * np.sin(psi)
-
-    # reach
-    l_wc2 = x_wc**2 + y_wc**2
-    l_wc = np.sqrt(l_wc2)
-
-    # reachability check
-    if l_wc > (l2 + l3) + 1e-6 or l_wc < abs(l2 - l3) - 1e-6:
-        return None
-
-    # shoulder geometry alpha/ gamma1 / gamma2
-    c = (l_wc2 - l2**2 - l3**2) / (2.0*l2*l3)
-    c = np.clip(c, -1.0, 1.0)
-    s = np.sqrt(max(0.0, 1.0 - c*c))   # elbow-down
-    alpha = np.arctan2(s, c)           # alpha in [0, pi]
-    gamma1 = np.arctan2(y_wc, x_wc)
-    gamma2 = np.arctan2(l3*np.sin(alpha), l2 + l3*np.cos(alpha))
-
-    # shoulder and elbow / theta2, theta3
-    theta2 = np.pi/2 - gamma1 - gamma2
-    theta3 = alpha
-
-    #wrist pitch and roll / theta4, theta5
-    theta4 = np.pi/2 - psi - theta2 - theta3
-    theta5 = 0.0 
-
-    #if 0 < theta1 < np.pi / 2:
-    #   theta5 = np.pi/2 - theta1
-    #if np.pi / 2 < theta1 < np.pi:
-    #   theta5 = np.pi/ 2 - np.pi - theta1
-
-    # Convert geometric to motor angles
-    q1 = theta1
-    q2 = theta2 - 0.245 # compensate for 'hidden link' - l2 used in geometry calculation
-    q3 = theta3 - 1.3258 # compensate for joint 3 frame rotation by beta
-    q4 = theta4
-    q5 = theta5
-
-    return np.array([q1, q2, q3, q4, q5], dtype=float)
-
 def compute_wrist_roll(theta1, block_angle_deg):
     block_angle_rad = np.deg2rad(block_angle_deg)
     
@@ -422,10 +356,14 @@ def compute_wrist_roll(theta1, block_angle_deg):
 def IK_geometric(pose, block_angle_deg):
     """!
     @brief      Produce joint configurations for provided pose
+
                 Converts a desired end-effector pose vector as np.array to joint angles. Determines if tool down or flat is required based on reachability arc
+
     @param      pose       The desired pose vector as np.array [x, y, z]
+
     @return     Joint configuration in a numpy array 1x4 where each col is a joint angle
     """
+
     # geometry
     l1_nom = 103.91
     l1_bias = 1.5
@@ -441,6 +379,7 @@ def IK_geometric(pose, block_angle_deg):
 
     # block angle
     block_angle_rad = np.deg2rad(block_angle_deg)
+
     #extract x, y, z from pose
     x_p, y_p, z_p = float(pose[0]), float(pose[1]), float(pose[2])
 
@@ -456,9 +395,10 @@ def IK_geometric(pose, block_angle_deg):
     # ----------------------------
     # assign tolerance to rmax so boundary is slightly less than numerical boundary
     # prevents unwanted behaviour at numerical boundary
-    rmax_nom = (l2 + l3)
-    rmax_tol = 5
+    rmax_nom = (l2 + l3) + 100
+    rmax_tol = 0
     rmax = rmax_nom - rmax_tol
+
     # Tool-down wrist center + outer reach
     x_wc_down = x0 - l4 * np.cos(psi_down)
     y_wc_down = y0 - l4 * np.sin(psi_down)
@@ -466,7 +406,7 @@ def IK_geometric(pose, block_angle_deg):
 
     # check if reach is within the tool-down arc and pose height to set psi
     # z pose limit will need tuning, or add further checks to segment out psi accordingly
-    if l_wc_down >= rmax + 1e-6:
+    if l_wc_down >= rmax + 1e-6 or z_p >= 200 + 1e-6:
         psi = psi_flat
     else:
         psi = psi_down
@@ -474,9 +414,11 @@ def IK_geometric(pose, block_angle_deg):
     # ----------------------------
     # IK solve for chosen psi
     # ----------------------------
+
     # wrist center
     x_wc = x0 - l4 * np.cos(psi)
     y_wc = y0 - l4 * np.sin(psi)
+
     # reach
     l_wc2 = x_wc**2 + y_wc**2
     l_wc = np.sqrt(l_wc2)
@@ -492,6 +434,7 @@ def IK_geometric(pose, block_angle_deg):
     # elbow-up branch
     s = np.sqrt(max(0.0, 1.0 - c*c))
     alpha = np.arctan2(s, c)
+
     gamma1 = np.arctan2(y_wc, x_wc)
     gamma2 = np.arctan2(l3*np.sin(alpha), l2 + l3*np.cos(alpha))
 
@@ -507,7 +450,10 @@ def IK_geometric(pose, block_angle_deg):
     if psi == psi_flat:
         theta5 = 0.0
     else:
-        theta5 = (block_angle_rad + theta1)
+        #to align the gripper to world x axis, assign to theta1 angle
+        theta5 = (theta1)
+        #to align the gripper to block angle, assign to theta 1 + block angle
+        #theta5 = (theta1 + block_angle_rad)
         theta5 = clamp(theta5)
 
     # Convert geometric to motor angles
@@ -613,8 +559,11 @@ def IK_geometric_stack(pose, psi, block_angle_deg=0.0, elbow_up=True):
     if abs(psi - (-np.pi / 2)) < 0.1 and abs(block_angle_deg) > 1e-3:
 
         ba = np.deg2rad(round(block_angle_deg / 45.0) * 45.0 % 180.0)
-
-        theta5 = clamp(np.pi / 2 + ba - theta1)
+        #TC 23FEB - changed block angle, getting better pickup angles now
+        theta5 = ba + theta1
+        theta5 = clamp(theta5)
+        #old code
+        #theta5 = clamp(np.pi / 2 + ba - theta1)
 
     q = np.array([
 
