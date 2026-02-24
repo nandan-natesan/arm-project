@@ -128,6 +128,8 @@ class Gui(QMainWindow):
         self.ui.btnUser7.clicked.connect(partial(nxt_if_arm_init, 'calibrate'))
         self.ui.btnUser8.setText('Click to Grab')
         self.ui.btnUser8.clicked.connect(partial(nxt_if_arm_init, 'click_to_grab'))
+        self.ui.btnUser9.setText('Challenge 1')
+        self.ui.btnUser9.clicked.connect(partial(nxt_if_arm_init, 'challenge_one'))
         self.ui.btnUser10.setText("Auto L3")
         self.ui.btnUser10.clicked.connect(lambda: self.sm.set_next_state("auto_L3"))
         self.ui.btnUser11.setText("Challenge 2")

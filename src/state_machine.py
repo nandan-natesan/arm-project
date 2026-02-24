@@ -60,7 +60,7 @@ class StateMachine():
             "l": np.array([ 160.0, 100.0], dtype=float),
         }
         self.DROP_Z0 = 15.0  # base z at table (tune)
-        
+        self.z_psi_threshold = 270 
 
         # stacking height counters
         self.tower_h = {"s": 0.0, "l": 0.0}
@@ -119,6 +119,9 @@ class StateMachine():
         if self.next_state == "click_to_grab":
             self.click_to_grab()
         
+        if self.next_state == "challenge_one":
+            self.challenge_one()
+        
         if self.next_state == "test_wrist_align":
             self.test_wrist_align()
 
@@ -141,15 +144,26 @@ class StateMachine():
     def _move_xyz(self, xyz_mm, block_angle_deg=0.0, wait=1.5, slow=True, place=False):
         if slow:
             self.rxarm.moving_time = 3.5
-            self.rxarm.accel_time  = 3.0
+            self.rxarm.accel_time = 3.0
 
         xyz_mm = np.asarray(xyz_mm, dtype=float).reshape(3)
 
-        q = IK_geometric(xyz_mm, float(block_angle_deg))
-        if q is None:
-            return False
+        q = None
 
-        q = np.asarray(q, dtype=float).reshape(-1)
+
+        try:
+            q_try, psi = find_feasible_ik(xyz_mm, float(block_angle_deg), -np.pi/2)
+            if q_try is not None:
+                q = np.asarray(q_try, dtype=float).reshape(-1)
+        except Exception:
+            pass
+
+        if q is None:
+            q_try = IK_geometric(xyz_mm, float(block_angle_deg))
+            if q_try is None:
+                print(f"[AUTO] IK fail xyz={xyz_mm}, angle={block_angle_deg}")
+                return False
+            q = np.asarray(q_try, dtype=float).reshape(-1)
 
         self.rxarm.set_positions(q)
         time.sleep(wait)
@@ -279,7 +293,7 @@ class StateMachine():
                 return sz, c, lst[0]
         return None, None, None
 
-    def auto_sort_stack(self, level=1):
+    def auto_sort_stack(self, level=3):
         self.current_state = f"auto_L{level}"
         t0 = time.time()
         self.goto_observe_pose(wait=2.0)
@@ -340,6 +354,7 @@ class StateMachine():
 
 
         cached_block_dict = self._build_block_dict(level)
+
 
 
 
@@ -1166,6 +1181,7 @@ class StateMachine():
         MAX_BLK  = 20
         TIMEOUT  = 580.0
         SCAN_Q   = np.array([0.0, 0.0, -1.57, 0.0, 0.0])
+        z_psi_threshold = 265
 
         n = 0
         t0 = time.time()
@@ -1241,7 +1257,7 @@ class StateMachine():
 
             # ── PLACE ──
             stack_z   = n * BLOCK_HEIGHT
-            rel_off   = 15.0 + n * 2.0
+            rel_off   = 20.0 + n * 2.0
             release_z = stack_z + rel_off
 
             mv(SCAN_Q)
@@ -1263,6 +1279,10 @@ class StateMachine():
                 print(f"[C3] #{n+1} ABOVE stack_z={stack_z:.0f} rel_z={release_z:.0f} "
                       f"app_z={approach_z:.0f} psi={np.rad2deg(psi):.1f}")
 
+
+                if release_z > z_psi_threshold:
+                    psi = 0.0
+
                 if not go_psi(app_pt, psi):
                     self.rxarm.gripper.release(); break
                 if not go_psi(rel_pt, psi, 0.0, MT_PLACE, AT_PLACE):
@@ -1273,7 +1293,7 @@ class StateMachine():
                 go_psi(app_pt, psi)
 
             else:
-                hover_above = 15.0
+                hover_above = 20.0
                 hover_z  = release_z + hover_above
                 over_pt  = np.array([STACK_X, STACK_Y, hover_z])
                 rel_pt   = np.array([STACK_X, STACK_Y, release_z])
@@ -1290,6 +1310,9 @@ class StateMachine():
                 print(f"[C3] #{n+1} SIDE stack_z={stack_z:.0f} rel_z={release_z:.0f} "
                       f"hover_z={hover_z:.0f} psi={np.rad2deg(psi):.1f}")
 
+                if release_z > z_psi_threshold:
+                    psi = 0.0
+                    
                 if not go_psi(side_pt, psi):
                     self.rxarm.gripper.release(); break
                 if not go_psi(over_pt, psi, 0.0, MT_PLACE, AT_PLACE):
@@ -1309,6 +1332,216 @@ class StateMachine():
         self.status_message = f"C3: Done! {n} blocks in {time.time()-t0:.1f}s"
         print(self.status_message)
         self.next_state = "idle"
+
+    def challenge_one(self):
+        """Challenge 1: Sort blocks – small left, large right in negative half-plane.
+        Auto-detects level from block counts.
+        L1 (3 large): spread on right side, no stacking.
+        L2 (3 small + 3 large): stack each group in rainbow order (red on bottom).
+        Handles stacked input blocks by unstacking to temp area first."""
+        self.current_state = "challenge_one"
+        self.status_message = "Challenge 1: Starting..."
+
+        RAINBOW = ["red", "orange", "yellow", "green", "blue", "purple"]
+        SIZE_THRESH = 1200.0
+        Z_STACKED = 55.0
+
+        SMALL_STACK_XY = np.array([-350.0, -25.0])
+        LARGE_STACK_XY = np.array([ 350.0, -25.0])
+        LARGE_SPREAD_Y = -25.0
+        LARGE_SPREAD_X0 = 100.0
+        LARGE_SPREAD_DX = 75.0
+        BASE_Z = 15.0
+        LARGE_BH = 39.0
+        SMALL_BH = 25.0
+
+        PICK_CLR = 60.0
+        GRIP_OFF = 15.0
+
+        MT_FAST = 2.0;  AT_FAST = 0.5
+        MT_SLOW = 3.0;  AT_SLOW = 1.0
+        SETTLE = 1.5
+        TIMEOUT = 175.0
+
+        SCAN_Q = np.array([0.0, 0.0, -1.57, 0.0, 0.0])
+
+        t0 = time.time()
+
+        def elapsed():
+            return time.time() - t0
+
+        def mv(q, mt=MT_FAST, at=AT_FAST):
+            self.rxarm.set_moving_time(mt)
+            self.rxarm.set_accel_time(at)
+            self.rxarm.set_positions(np.asarray(q, dtype=float).reshape(-1))
+            time.sleep(mt + 0.4)
+
+        def go(xyz, ba=0.0, mt=MT_FAST, at=AT_FAST):
+            q, psi = find_feasible_ik(xyz, ba, -np.pi / 2)
+            if q is None:
+                print(f"[C1] UNREACHABLE: {xyz}")
+                return False
+            mv(q, mt, at)
+            return True
+
+        def scan_blocks():
+            mv(SCAN_Q)
+            time.sleep(SETTLE)
+            self.camera.blockDetector()
+            time.sleep(0.5)
+            dets = getattr(self.camera, 'block_detections', None)
+            if not dets or len(dets) == 0:
+                time.sleep(1.0)
+                self.camera.blockDetector()
+                time.sleep(0.5)
+                dets = getattr(self.camera, 'block_detections', None)
+            result = {"large": [], "small": []}
+            for d in (dets or []):
+                color = (d.get('color', '') or '').lower()
+                if color not in RAINBOW:
+                    continue
+                rect_area = float(d.get('rect_area', 0.0))
+                sz = "large" if rect_area >= SIZE_THRESH else "small"
+                cx, cy = d.get('center_px', (None, None))
+                if cx is None or cy is None:
+                    continue
+                w = self.camera.pixel_to_world(int(cx), int(cy))
+                if w is None:
+                    continue
+                w = np.asarray(w, dtype=float).ravel()
+                if w[1] < -50.0:
+                    continue
+                result[sz].append({
+                    'color': color,
+                    'xyz': w[:3].copy(),
+                    'angle_deg': float(d.get('angle_deg', 0.0)),
+                })
+            return result
+
+        def rainbow_rank(color):
+            try:
+                return RAINBOW.index(color)
+            except ValueError:
+                return 999
+
+        def pick_block(xyz, angle):
+            self.rxarm.gripper.release()
+            time.sleep(0.3)
+            if not go([xyz[0], xyz[1], xyz[2] + PICK_CLR], angle):
+                return False
+            if not go([xyz[0], xyz[1], xyz[2] - GRIP_OFF], angle, MT_SLOW, AT_SLOW):
+                return False
+            self.rxarm.gripper.grasp()
+            time.sleep(0.5)
+            go([xyz[0], xyz[1], xyz[2] + PICK_CLR], angle)
+            return True
+
+        def place_block(dst):
+            mv(SCAN_Q)
+            if not go([dst[0], dst[1], dst[2] + PICK_CLR], 0.0):
+                self.rxarm.gripper.release()
+                time.sleep(0.3)
+                return False
+            if not go([dst[0], dst[1], dst[2]], 0.0, MT_SLOW, AT_SLOW):
+                self.rxarm.gripper.release()
+                time.sleep(0.3)
+                return False
+            self.rxarm.gripper.release()
+            time.sleep(0.5)
+            go([dst[0], dst[1], dst[2] + PICK_CLR], 0.0)
+            return True
+
+        def find_fresh(color, sz, blocks_dict):
+            for fb in blocks_dict[sz]:
+                if fb['color'] == color:
+                    return fb
+            return None
+
+        # ─── Phase 1: unstack any blocks sitting on top of others ───
+        print("[C1] Phase 1: checking for stacked blocks...")
+        blocks = scan_blocks()
+        n_large = len(blocks["large"])
+        n_small = len(blocks["small"])
+        level = 2 if n_small > 0 else 1
+        print(f"[C1] Detected {n_large} large, {n_small} small → Level {level}")
+
+        all_blks = blocks["large"] + blocks["small"]
+        stacked = sorted(
+            [b for b in all_blks if b['xyz'][2] > Z_STACKED],
+            key=lambda b: -b['xyz'][2],
+        )
+        if stacked:
+            print(f"[C1] {len(stacked)} stacked block(s) found, moving aside...")
+            for i, blk in enumerate(stacked):
+                if elapsed() > TIMEOUT:
+                    break
+                self.status_message = f"C1: unstacking {blk['color']}..."
+                tmp = np.array([-100.0 + 70.0 * i, 225.0, BASE_Z])
+                if pick_block(blk['xyz'], blk['angle_deg']):
+                    place_block(tmp)
+
+        # ─── Phase 2: fresh scan, sort by rainbow order ───
+        if elapsed() < TIMEOUT:
+            print("[C1] Phase 2: re-scanning & sorting...")
+            time.sleep(0.5)
+            blocks = scan_blocks()
+            for sz in ["large", "small"]:
+                blocks[sz].sort(key=lambda b: rainbow_rank(b['color']))
+                for b in blocks[sz]:
+                    print(f"[C1]   {sz}: {b['color']} @ "
+                        f"({b['xyz'][0]:.0f}, {b['xyz'][1]:.0f}, {b['xyz'][2]:.0f})")
+
+        # ─── Phase 3: pick & place ───
+        n_placed = 0
+
+        if level == 1:
+            for i, blk in enumerate(blocks["large"]):
+                if elapsed() > TIMEOUT:
+                    break
+                fresh = scan_blocks()
+                target = find_fresh(blk['color'], "large", fresh)
+                if target is None:
+                    print(f"[C1] Lost {blk['color']} large, skipping")
+                    continue
+                drop = np.array([
+                    LARGE_SPREAD_X0 + LARGE_SPREAD_DX * i,
+                    LARGE_SPREAD_Y,
+                    BASE_Z,
+                ])
+                self.status_message = f"C1 L1: placing {target['color']} large #{i+1}"
+                if pick_block(target['xyz'], target['angle_deg']):
+                    if place_block(drop):
+                        n_placed += 1
+                        print(f"[C1] Placed #{n_placed}. {elapsed():.1f}s")
+        else:
+            stack_z = {"large": BASE_Z, "small": BASE_Z}
+            bh = {"large": LARGE_BH, "small": SMALL_BH}
+            sxy = {"large": LARGE_STACK_XY, "small": SMALL_STACK_XY}
+
+            for sz in ["large", "small"]:
+                for blk in blocks[sz]:
+                    if elapsed() > TIMEOUT:
+                        break
+                    fresh = scan_blocks()
+                    target = find_fresh(blk['color'], sz, fresh)
+                    if target is None:
+                        print(f"[C1] Lost {blk['color']} {sz}, skipping")
+                        continue
+                    drop = np.array([sxy[sz][0], sxy[sz][1], stack_z[sz]])
+                    self.status_message = (f"C1 L2: {target['color']} {sz} "
+                                        f"→ z={stack_z[sz]:.0f}")
+                    if pick_block(target['xyz'], target['angle_deg']):
+                        if place_block(drop):
+                            stack_z[sz] += bh[sz]
+                            n_placed += 1
+                            print(f"[C1] Placed #{n_placed}. {elapsed():.1f}s")
+
+        mv(SCAN_Q)
+        self.status_message = f"C1 L{level}: done! {n_placed} blocks in {elapsed():.1f}s"
+        print(self.status_message)
+        self.next_state = "idle"
+
+
 
 
 class StateMachineThread(QThread):
