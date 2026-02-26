@@ -1,16 +1,38 @@
 """!
-Implements Forward and Inverse kinematics with DH parametrs and product of exponentials
+Implements Forward and Inverse kinematics for the RX200 5-DOF arm.
 
-TODO: Here is where you will write all of your kinematics functions
-There are some functions to start with, you may need to implement a few more
+Includes:
+    - DH-parameter based Forward Kinematics  (FK_dh)   — currently active
+    - Product of Exponentials FK             (FK_pox)  — alternative, see docstring
+    - Geometric IK with tool-down / tool-flat auto-selection (IK_geometric)
+    - Stacking IK with explicit psi control  (IK_geometric_stack)
+    - Joint limit checking and feasibility search for stacking
+
+Switching FK method:
+    Both FK_dh and FK_pox compute the same end-effector pose. To switch:
+    1. In rxarm.py  →  RXArm.get_ee_pose(), change FK_dh(...) to FK_pox(...)
+    2. FK_pox reads M_matrix and S_list from config/rx200_pox.csv (loaded in RXArm.__init__)
+    3. FK_dh uses hardcoded DH params with joint-angle offsets
+
+Wrist angle pipeline (how the gripper aligns to a block):
+    1. camera.py segment_blocks_watershed() calls cv2.minAreaRect() on each block
+       contour, which returns an orientation angle in degrees.
+    2. That angle_deg is passed through IK as block_angle_deg.
+    3. In IK_geometric_stack (tool-down mode, psi ≈ -π/2):
+         - angle is quantized to nearest 45° and converted to radians (ba)
+         - theta5 (wrist roll) = ba + theta1  (base angle), then clamped to (-π, π]
+       This rotates the gripper so its fingers align with the block's long axis.
+    4. In IK_geometric (simpler version):
+         - tool-down:  theta5 = theta1  (gripper aligned to world X)
+         - tool-flat:  theta5 = 0
 """
 
 import numpy as np
-# expm is a matrix exponential function
-from scipy.linalg import expm
 
-# Helper function
-import numpy as np
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Helpers: matrix exponential, screw vectors, angle clamping
+# ═══════════════════════════════════════════════════════════════════════
 
 def matrix_exp_6(se3_mat):
     """
@@ -95,6 +117,11 @@ def clamp(angle):
         angle += 2 * np.pi
     return angle
 
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Forward Kinematics — DH Parameters
+# ═══════════════════════════════════════════════════════════════════════
+
 def get_transform_from_dh(a, alpha, d, theta):
     """!
     @brief      Gets the transformation matrix T from dh parameters.
@@ -136,33 +163,26 @@ def FK_dh(dh_params, joint_angles, link):
     @return     (4x4 np.array) Transformation matrix representing the pose of the desired link
     """
     
-    # 1. Prepare the parameters
-    # Use copy=True to avoid modifying the original dh_params list passed by the user
-    # params = np.array(dh_params, copy=True)
-    params = np.array([[0,1.570796327,103.91,0],
-                       [205.73,0,0,1.3342],
-                       [200,0,0,-1.3342],
-                       [0,1.570796327,0,1.570796327],
-                       [0,0,174.15,0]])
-    
-    # Add current joint angles to the theta column (index 3)
-    # This combines the static offset (from DH table) with the dynamic angle (from motors)
-    # params[i, 3] = theta_offset + joint_angle
-    num_joints = len(joint_angles)
+    # RX200 DH table: [a (mm), alpha (rad), d (mm), theta_offset (rad)]
+    # Rows: base→shoulder, shoulder→elbow, elbow→wrist_angle, wrist_angle→wrist_rotate, wrist→EE
+    params = np.array([[0,       1.570796327, 103.91, 0         ],
+                       [205.73,  0,           0,      1.3342    ],
+                       [200,     0,           0,     -1.3342    ],
+                       [0,       1.570796327, 0,      1.570796327],
+                       [0,       0,           174.15, 0         ]])
 
+    # Subtract motor angles from theta offsets (sign convention for this arm)
     params[:3, 3] -= joint_angles[:3]
     params[3, 3] -= joint_angles[3]
     params[4, 3] -= joint_angles[4]
 
-    # params[:num_joints, 3] += joint_angles
-    
-    # 2. Initialize the global transformation as Identity
+    # Base frame rotation: aligns DH frame 0 with our world frame convention
     T_base = np.array([
-    [ 0,  1,  0,  0],
-    [1,  0,  0,  0],
-    [ 0,  0,  1,  0],
-    [ 0,  0,  0,  1]
-])
+        [0, 1, 0, 0],
+        [1, 0, 0, 0],
+        [0, 0, 1, 0],
+        [0, 0, 0, 1]
+    ])
 
     T_global = T_base
     for i in range(link):
@@ -247,32 +267,30 @@ def get_pose_from_T(T):
     
     return [x, y, z, roll, pitch, yaw]
 
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Forward Kinematics — Product of Exponentials (PoX)
+#
+#  Alternative to FK_dh. Uses screw axes at home configuration instead
+#  of DH link parameters. To switch:
+#    In rxarm.py RXArm.get_ee_pose(), replace:
+#       ee_T = FK_dh(None, self.get_positions(), self.num_joints)
+#    with:
+#       ee_T = FK_pox(self.get_positions(), self.M_matrix, self.S_list)
+#    M_matrix and S_list are loaded from config/rx200_pox.csv at init.
+# ═══════════════════════════════════════════════════════════════════════
+
 def FK_pox(joint_angles, m_mat, s_lst):
     """!
-    @brief      Get a representing the pose of the desired link
+    @brief      Product of Exponentials FK: T = e^([S1]*q1) * ... * e^([Sn]*qn) * M
 
     @param      joint_angles  (list or np.array) The joint angles [theta1, theta2, ...]
-    @param      m_mat         (4x4 np.array) The M matrix (Home configuration)
-    @param      s_lst         (6xN np.array) List of screw vectors (columns)
+    @param      m_mat         (4x4 np.array) Home configuration matrix M
+    @param      s_lst         (6xN np.array) Screw axes at home config (columns)
 
-    @return     (4x4 np.array) Homogeneous matrix representing the pose of the desired link
+    @return     (4x4 np.array) Homogeneous transform for the end-effector
     """
-    
-    # 1. Initialize the transformation matrix as Identity
-    # This will accumulate the joint transformations: T = e^(S1*t1) * e^(S2*t2) ...
     T = np.eye(4)
-    #     m_mat = np.array([[1.0,0.0,0.0,408.575]
-    # [0.0,1.0,0.0,0.0],
-    #     [0.0,0.0,1.0,304.57],
-    # [0.0,0.0,0.0,1.0]
-    # ])    
-    #     s_lst = np.array([[0.0,0.0,0.0,0.0,1.0],
-    #     [0.0,1.0,1.0,1.0,0.0],
-    #     [0.0,-104.57,-304.57,-304.57,0.0],
-    #     [0.0,0.0,0.0,0.0,304.57],
-    #     [0.0,0.0,50,250,0.0],
-    #     ])
-    # screw vectors
     m_mat = np.array(m_mat)
     s_lst = np.array(s_lst)
     # 2. Iterate through each joint
@@ -307,51 +325,15 @@ def FK_pox(joint_angles, m_mat, s_lst):
             [ 0,  0,  0,  1]
         ])
 
-    # Pre-multiply by the base frame transformation
     T_final = np.dot(T_base, T_robot)
-    # T_final = T @ m_mat
     
     return T_final
 
 
-def to_s_matrix(w, v):
-    """!
-    @brief      Convert to s matrix.
 
-    TODO: implement this function
-    Find the [s] matrix for the POX method e^([s]*theta)
-
-    @param      w     { parameter_description }
-    @param      v     { parameter_description }
-
-    @return     { description_of_the_return_value }
-    """
-    pass
-
-
-def compute_wrist_roll(theta1, block_angle_deg):
-    block_angle_rad = np.deg2rad(block_angle_deg)
-    
-    print(f"[WRIST DEBUG] === compute_wrist_roll ===")
-    print(f"[WRIST DEBUG] block_angle_deg (from detector): {block_angle_deg:.1f}°")
-    print(f"[WRIST DEBUG] block_angle_rad: {block_angle_rad:.4f} rad")
-    print(f"[WRIST DEBUG] theta1 (base): {theta1:.4f} rad = {np.rad2deg(theta1):.1f}°")
-    
-    raw = block_angle_rad - theta1 + np.pi / 2
-    print(f"[WRIST DEBUG] raw theta5 (block - theta1 + pi/2): {raw:.4f} rad = {np.rad2deg(raw):.1f}°")
-    
-    theta5 = clamp(raw)
-    print(f"[WRIST DEBUG] after clamp: {theta5:.4f} rad = {np.rad2deg(theta5):.1f}°")
-    
-    before_sym = theta5
-    if theta5 > np.pi / 2:
-        theta5 -= np.pi
-    elif theta5 < -np.pi / 2:
-        theta5 += np.pi
-    print(f"[WRIST DEBUG] after symmetry: {theta5:.4f} rad = {np.rad2deg(theta5):.1f}° (changed={before_sym != theta5})")
-    print(f"[WRIST DEBUG] ========================")
-    
-    return theta5
+# ═══════════════════════════════════════════════════════════════════════
+#  Inverse Kinematics — Geometric approach for 5-DOF RX200
+# ═══════════════════════════════════════════════════════════════════════
 
 def IK_geometric(pose, block_angle_deg):
     """!
@@ -445,15 +427,14 @@ def IK_geometric(pose, block_angle_deg):
     # wrist pitch / theta4
     theta4 = np.pi/2 - psi - theta2 - theta3
 
-    # wrist roll / theta5
-    # depends on tool orientation
+    # Wrist roll (theta5) — controls gripper orientation about the approach axis
+    # Tool-flat: no roll needed (gripper horizontal)
+    # Tool-down: set theta5 = theta1 to keep gripper aligned with world X axis
+    #   To instead align with a detected block angle, use: theta5 = theta1 + block_angle_rad
     if psi == psi_flat:
         theta5 = 0.0
     else:
-        #to align the gripper to world x axis, assign to theta1 angle
-        theta5 = (theta1)
-        #to align the gripper to block angle, assign to theta 1 + block angle
-        #theta5 = (theta1 + block_angle_rad)
+        theta5 = theta1
         theta5 = clamp(theta5)
 
     # Convert geometric to motor angles
@@ -466,143 +447,93 @@ def IK_geometric(pose, block_angle_deg):
     # return joint positions
     return np.array([q1, q2, q3, q4, q5], dtype=float)
 
+
+# ═══════════════════════════════════════════════════════════════════════
+#  Joint limits and feasibility search (used for stacking challenges)
+# ═══════════════════════════════════════════════════════════════════════
+
 def check_joint_limits(q):
-
     """Returns True if all motor angles are within RX200 hardware limits."""
-
     limits = [
-
         (-3.14,  3.14),
-
         (-1.885, 1.972),
-
         (-1.885, 1.623),
-
         (-1.745, 2.147),
-
         (-3.14,  3.14),
-
     ]
-
     for i, (lo, hi) in enumerate(limits):
-
         if q[i] < lo - 1e-4 or q[i] > hi + 1e-4:
-
             return False
-
     return True
 
 def IK_geometric_stack(pose, psi, block_angle_deg=0.0, elbow_up=True):
-
     """
-
     IK with explicit approach angle psi and elbow configuration.
-
     psi = -pi/2 -> tool points straight down
-
     psi = 0     -> tool points horizontally forward
-
     """
-
     l1 = 103.91 + 1.5
-
     l2 = 205.73
-
     l3 = 200.0
-
     l4 = 174.15
 
     x_p, y_p, z_p = float(pose[0]), float(pose[1]), float(pose[2])
-
     theta1 = np.arctan2(-x_p, y_p)
-
     x0 = np.hypot(x_p, y_p)
-
     y0 = z_p - l1
 
     x_wc = x0 - l4 * np.cos(psi)
-
     y_wc = y0 - l4 * np.sin(psi)
-
     l_wc2 = x_wc**2 + y_wc**2
-
     l_wc = np.sqrt(l_wc2)
 
     if l_wc > (l2 + l3) + 1e-6 or l_wc < abs(l2 - l3) - 1e-6:
-
         return None
 
     c = (l_wc2 - l2**2 - l3**2) / (2.0 * l2 * l3)
-
     c = np.clip(c, -1.0, 1.0)
-
     s_val = np.sqrt(max(0.0, 1.0 - c * c))
-
     if not elbow_up:
-
         s_val = -s_val
 
     alpha = np.arctan2(s_val, c)
-
     gamma1 = np.arctan2(y_wc, x_wc)
-
     gamma2 = np.arctan2(l3 * np.sin(alpha), l2 + l3 * np.cos(alpha))
 
     theta2 = np.pi / 2 - gamma1 - gamma2
-
     theta3 = alpha
-
     theta4 = np.pi / 2 - psi - theta2 - theta3
 
+    # Wrist roll: when tool is pointing down (psi ≈ -π/2) and a block angle is given,
+    # align the gripper to the block's detected orientation.
+    # The angle from cv2.minAreaRect is quantized to 45° steps for robustness,
+    # then combined with base rotation (theta1) to produce a world-frame gripper angle.
     theta5 = 0.0
-
     if abs(psi - (-np.pi / 2)) < 0.1 and abs(block_angle_deg) > 1e-3:
-
         ba = np.deg2rad(round(block_angle_deg / 45.0) * 45.0 % 180.0)
-        #TC 23FEB - changed block angle, getting better pickup angles now
         theta5 = ba + theta1
         theta5 = clamp(theta5)
-        #old code
-        #theta5 = clamp(np.pi / 2 + ba - theta1)
 
     q = np.array([
-
         theta1,
-
         theta2 - 0.245,
-
         theta3 - 1.3258,
-
         theta4,
-
         theta5
-
     ], dtype=float)
-
     return q
 
 def find_feasible_ik(pose, block_angle_deg=0.0, preferred_psi=-np.pi/2):
-
     """
-
     Tries psi values from preferred_psi toward 0, with both elbow configs.
-
     Returns (q, psi) for the most vertical feasible solution, or (None, None).
-
     """
-
     psi_candidates = np.linspace(preferred_psi, 0.0, 13)
-
     for psi in psi_candidates:
-
         for elbow_up in [True, False]:
-
             q = IK_geometric_stack(pose, psi, block_angle_deg, elbow_up)
-
             if q is not None and check_joint_limits(q):
-
                 return q, psi
-
     return None, None
 
 
@@ -647,60 +578,4 @@ def compute_paired_psi(xyz_high, xyz_low):
         if ok_h and ok_l:
             return psi
     return None
-
-
-# def IK_geometric(dh_params, pose):
-#     l1 = 103.91
-#     l2 = 205.73
-#     l3 = 200
-#     l4 = 165
-#     l2_dtheta = 14 * np.pi / 180
-
-#     x, y, z, phi, the, psi = pose
-#     psi = -np.pi if psi < -np.pi else np.pi if psi > np.pi else psi
-    
-#     theta1 = np.arctan2(-x, y)
-#     theta1 = (theta1 + np.pi) % (2*np.pi) - np.pi
-
-#     ee_z = np.array([
-#         -1 * np.sin(theta1)*np.cos(the), 
-#         np.cos(theta1)*np.cos(the), 
-#         -1 * np.sin(the)
-#     ])
-#     xc, yc, zc = np.array([x, y, z]) - l4 * ee_z
-
-#     r = np.sqrt(xc**2 + yc**2)
-#     s = zc - l1
-
-#     dist = np.sqrt(r**2 + s**2)
-#     if dist > (l2 + l3) + 1e-6:
-#         # unreachable position
-#         return np.zeros((1, 5))
-
-#     cos_elbow = (r*r + s*s - l2*l2 - l3*l3) / (-2.0 * l2 * l3)
-#     cos_elbow = np.clip(cos_elbow, -1.0, 1.0)
-
-#     elbow_angles = np.array([
-#          np.arccos(cos_elbow),
-#     ])
-
-
-    
-#     sols = []
-#     for th3_raw in elbow_angles:
-#         th2_raw = np.arctan2(s,r) + np.arccos((l2**2 + r**2 + s**2 - l3**2) / (2 * l2 * np.sqrt(r**2 + s**2)))
-
-#         th2 = (np.pi/2) - th2_raw - l2_dtheta
-#         th3 = (np.pi/2) - th3_raw + l2_dtheta
-#         th4 = the - (th2 + th3)
-
-#         th5 = psi
-
-#         q = np.array([theta1, th2, th3, th4, th5], dtype=float)
-#         q = (q + np.pi) % (2.0*np.pi) - np.pi
-#         sols.append(q)
-
-#     solutions = np.vstack(sols)
-    
-#     return solutions
 

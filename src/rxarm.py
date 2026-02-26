@@ -28,9 +28,6 @@ sys.path.append('../../interbotix_ws/src/interbotix_ros_toolboxes/interbotix_xs_
 from arm import InterbotixManipulatorXS
 from mr_descriptions import ModernRoboticsDescription as mrd
 
-"""
-TODO: Implement the missing functions and add anything you need to support them
-"""
 """ Radians to/from  Degrees conversions """
 D2R = np.pi / 180.0
 R2D = 180.0 / np.pi
@@ -83,7 +80,6 @@ class RXArm(InterbotixManipulatorXS):
         self.dh_params = parse_dh_param_file(os.path.join(os.path.dirname(__file__), '../config/rx200_dh.csv'))
         #POX params
         self.M_matrix, self.S_list = parse_pox_param_file(os.path.join(os.path.dirname(__file__), '../config/rx200_pox.csv'))
-        print(self.M_matrix, self.S_list)
 
     def initialize(self):
         """!
@@ -188,10 +184,10 @@ class RXArm(InterbotixManipulatorXS):
         @return     The EE pose as [x, y, z, phi, theta, psi]
         """
 
-        # TODO: Change the following function to FK_pox if you're using PoX
+        # Using DH-parameter FK. To switch to Product of Exponentials:
+        #   ee_T = FK_pox(self.get_positions(), m_mat=self.M_matrix, s_lst=self.S_list)
+        # M_matrix and S_list are loaded from config/rx200_pox.csv in __init__.
         ee_T = FK_dh(None, self.get_positions(), self.num_joints)
-        # ee_T = FK_pox(self.get_positions(), m_mat=self.M_matrix, s_lst=self.S_list)
-
         ee_pose = get_pose_from_T(ee_T)
         return ee_pose
 
@@ -235,7 +231,6 @@ class RXArmThread(QThread):
 
         @param      RXArm  The RXArm
         @param      parent  The parent
-        @details    TODO: set any additional initial parameters (like PID gains) here
         """
         QThread.__init__(self, parent=parent)
         self.rxarm = rxarm
@@ -259,8 +254,6 @@ class RXArmThread(QThread):
         self.updateJointReadout.emit(self.rxarm.position_fb.tolist())
         self.updateEndEffectorReadout.emit(self.rxarm.get_ee_pose())
         self.rxarm.check_gripper_state()
-        #for name in self.rxarm.joint_names:
-        #    print("{0} gains: {1}".format(name, self.rxarm.get_motor_pid_params(name)))
         if (__name__ == '__main__'):
             print(self.rxarm.position_fb)
 

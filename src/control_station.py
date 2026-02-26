@@ -23,29 +23,6 @@ from state_machine import StateMachine, StateMachineThread
 """ Radians to/from  Degrees conversions """
 D2R = np.pi / 180.0
 R2D = 180.0 / np.pi
-#T_c2w = np.array([[1,0,0,-20], [0,-9.81627e-1,-1.908089e-1, 3.25e2], [0,1.98089e-1,-9.8162719e-1,9.92e2], [0,0,0,1]])
-T_c2w = np.array([[0.999777,0.003948,-0.020768,1.481774], [0.008825, -0.970650,0.240334, 349.314655], [-0.019210,-0.240464,-0.970468,994.319565], [0,0,0,1]])
-#  = np.array([[973.791, 0, 661.585], [0,977.599, 380.320], [0,0,1]])
-D = np.array(
-            [
-            0.15564486384391785,
-            0.48568257689476013,
-            0.0019681642297655344,
-            0.0007267732871696353,
-            0.44230175018310547
-            ]
-        )
-# K = np.array([[918.360, 0.0 , 661.192], [0.0 ,919.154, 356.597], [0.0 ,0.0 , 1.0]])
-
-# - 918.3599853515625
-# - 0.0
-# - 661.1923217773438
-# - 0.0
-# - 919.1538696289062
-# - 356.59722900390625
-# - 0.0
-# - 0.0
-# - 1.0
 
 class Gui(QMainWindow):
     """!
@@ -85,18 +62,12 @@ class Gui(QMainWindow):
         self.rxarm = RXArm()
         print("Done creating rx arm instance.")
         self.sm = StateMachine(self.rxarm, self.camera)
-        """
-        Attach Functions to Buttons & Sliders
-        TODO: NAME AND CONNECT BUTTONS AS NEEDED
-        """
+        """Attach Functions to Buttons & Sliders"""
         # Video
         self.ui.videoDisplay.setMouseTracking(True)
         self.ui.videoDisplay.mouseMoveEvent = self.trackMouse
         self.ui.videoDisplay.mousePressEvent = self.calibrateMousePress
 
-        # Buttons
-        # Handy lambda function falsethat can be used with Partial to only set the new state if the rxarm is initialized
-        #nxt_if_arm_init = lambda next_state: self.sm.set_next_state(next_state if self.rxarm.initialized else None)
         nxt_if_arm_init = lambda next_state: self.sm.set_next_state(next_state)
         self.ui.btn_estop.clicked.connect(self.estop)
         self.ui.btn_init_arm.clicked.connect(self.initRxarm)
@@ -106,9 +77,6 @@ class Gui(QMainWindow):
         self.ui.btn_sleep_arm.clicked.connect(lambda: self.rxarm.sleep())
         self.ui.btn_calibrate.clicked.connect(partial(nxt_if_arm_init, 'calibrate'))
 
-        # User Buttons
-        # TODO: Add more lines here to add more buttons
-        # To make a button activate a state, copy the lines for btnUser3 but change 'execute' to whichever state you want
         self.ui.btnUser1.setText('Open Gripper')
         self.ui.btnUser1.clicked.connect(lambda: self.rxarm.gripper.release())
         self.ui.btnUser1.clicked.connect(lambda: self.sm.set_gripper_state('open'))
@@ -117,13 +85,17 @@ class Gui(QMainWindow):
         self.ui.btnUser2.clicked.connect(lambda: self.sm.set_gripper_state('closed'))
         self.ui.btnUser3.setText('Execute')
         self.ui.btnUser3.clicked.connect(partial(nxt_if_arm_init, 'execute'))
-        #our buttons
-        #self.ui.btnUser4.setText('Record WP')
-        #self.ui.btnUser4.clicked.connect(lambda: self.sm.record_waypoints())
-        #self.ui.btnUser5.setText('Clear WPs')
-        #self.ui.btnUser5.clicked.connect(lambda: self.sm.clear_waypoints())
-        #self.ui.btnUser6.setText('Event 2')
-        #self.ui.btnUser6.clicked.connect(partial(nxt_if_arm_init, 'Event_2'))
+
+        # ── Teach & Play buttons (uncomment to enable) ──
+        # To use: disable torque, move arm to each pose manually, click Record WP,
+        # toggle gripper as needed, then click Teach Play to replay the sequence.
+        # self.ui.btnUser4.setText('Record WP')
+        # self.ui.btnUser4.clicked.connect(lambda: self.sm.record_waypoints())
+        # self.ui.btnUser5.setText('Clear WPs')
+        # self.ui.btnUser5.clicked.connect(lambda: self.sm.clear_waypoints())
+        # self.ui.btnUser6.setText('Teach Play')
+        # self.ui.btnUser6.clicked.connect(partial(nxt_if_arm_init, 'teach_play'))
+
         self.ui.btnUser7.setText('Calibrate')
         self.ui.btnUser7.clicked.connect(partial(nxt_if_arm_init, 'calibrate'))
         self.ui.btnUser8.setText('Click to Grab')
@@ -251,31 +223,15 @@ class Gui(QMainWindow):
 
     def trackMouse(self, mouse_event):
         """!
-        @brief      Show the mouse position in GUI
-
-                    TODO: after implementing workspace calibration display the world coordinates the mouse points to in the RGB
-                    video image.
-
-        @param      mouse_event  QtMouseEvent containing the pose of the mouse at the time of the event not current time
+        @brief      Show the mouse position (pixel + world coordinates) in the GUI.
         """
-
-        # TODO: Modify this function to change the mouseover text.
-        # You should make the mouseover text display the (x, y, z) coordinates of the pixel being hovered over
-
         pt = mouse_event.pos()
         
         if self.camera.DepthFrameRaw.any() != 0:
             z = self.camera.DepthFrameRaw[pt.y()][pt.x()]
-            # p3d_cam = z * np.linalg.inv(self.camera.intrinsic_matrix) @ np.array([pt.x(), pt.y(), 1])
-            # # p3d_world = np.linalg.inv(T_c2w) @ np.array([p3d_cam[0], p3d_cam[1], p3d_cam[2], 1])
-            # h_inv =np.linalg.inv(self.camera.extrinsic_matrix)
-
-            # p3d_world =  np.dot(h_inv, np.array([p3d_cam[0], p3d_cam[1], p3d_cam[2], 1]))
             p3d_world = self.camera.pixel_to_world(pt.x(), pt.y())
-            # z = self.camera.DepthFrameRaw[pt.y()][pt.x()]
             self.ui.rdoutMousePixels.setText("(%.0f,%.0f,%.0f)" %
                                              (pt.x(), pt.y(), z))
-            # world_pos = self.camera.pixel_to_world(pt.x(),pt.y())
             self.ui.rdoutMouseWorld.setText(f"({p3d_world[0]:.2f}, {p3d_world[1]:.2f}, {p3d_world[2]:.2f})")
 
     def calibrateMousePress(self, mouse_event):
@@ -300,7 +256,6 @@ class Gui(QMainWindow):
         self.sm.set_next_state('initialize_rxarm')
 
 
-### TODO: Add ability to parse POX config file as well
 def main():
     """!
     @brief      Starts the GUI
