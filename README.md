@@ -5,7 +5,7 @@ A robotic arm system that uses computer vision and inverse kinematics to autonom
 ---
 
 
-<video src="https://raw.githubusercontent.com/nandan-natesan/arm-project/main/media/arm_stack_video.mp4" controls muted playsinline width="630"></video>
+![Arm stacking demo](media/arm_stack_demo.gif)
 
 ---
 
