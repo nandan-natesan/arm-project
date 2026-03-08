@@ -4,13 +4,8 @@ A robotic arm system that uses computer vision and inverse kinematics to autonom
 
 ---
 
-## Demo Video
 
 [![Watch the arm stacking demo — click to play](media/challenge2_final%20result_vibgor.jpeg)](https://github.com/nandan-natesan/arm-project/raw/main/media/arm_stack_video.mp4)
-
-*Click the image above to watch the arm autonomously stacking cubes (opens in new tab, no audio).*
-
-> **Tip:** For inline video playback in the README, edit the README on GitHub, drag-and-drop `media/arm_stack_video.mp4` into the editor, and replace this section with the generated `<video>` tag. GitHub only renders video from its own `user-images.githubusercontent.com` URLs.
 
 ---
 
