@@ -1,52 +1,118 @@
-# armlab-f25
+# RX200 Arm Lab — Autonomous Block Manipulation
 
-**Table of content**
-- [Code structure](#code-structure)
-- [How to start](#how-to-start)
+A robotic arm system that uses computer vision and inverse kinematics to autonomously detect, pick, sort, and stack colored blocks. The arm is controlled via a state machine that coordinates a RealSense camera, AprilTag calibration, and an Interbotix RX200 5-DOF arm.
 
-## Code structure
+---
 
-### Relevant
-You do need to modify **some** of these files.
-- [install_scripts](install_scripts)
-    - [install_scripts/config](install_scripts/config)
-        - `rs_l515_launch.py` - to launch the camera
-        - `tags_Standard41h12.yaml` - to define the april tags you used on the board
-    - `install_Dependencies.sh` - to install ROS2/All the ROS wrappers/Dependencies
-    - `install_Interbotix.sh` - to install arm related stuff
-    - `install_LaunchFiles.sh` - to move the files under `/config` to where it should to be 
-- [launch](launch) - to store the launch files, details in [here](launch/README.md)
-- [src](src) - where you actually write code
-    - `camera.py` - Implements the Camera class for the RealSense camera. 
-        - Functions to capture and convert frames
-        - Functions to load camera calibration data
-        - Functions to find and perform 2D transforms
-        - Functions to perform world-to-camera and camera-to-world transforms
-        - Functions to detect blocks in the depth and RGB frames
-    - `control_station.py`
-         - This is the main program. It sets up the threads and callback functions. Takes flags for whether to use the product of exponentials (PoX) or Denabit-Hartenberg (DH) table for forward kinematics and an argument for the DH table or PoX configuration. You will upgrade some functions and also implement others according to the comments given in the code.
-    - `kinematics.py` - Implements functions for forward and inverse kinematics
-    - `rxarm.py` - Implements the RXArm class
-        - Feedback from joints
-        - Functions to command the joints
-        - Functions to get feedback from joints
-        - Functions to do FK and IK
-        - A run function to update the dynamixiel servos
-        - A function to read the RX200 arm config file
-    - `state_machine.py` - Implements the StateMachine class
-        - The state machine is the heart of the controller
-- [config](config)
-    - `rx200_dh.csv` - Contains the DH table for the RX200 arm
-        - You will need to fill this in
-    - `rx200_pox.csv` - Containes the S list and M matrix for the RX200 arm.
-        - You will need to fill this in
+## Demo Video
 
+<video src="media/arm_stack_video.mp4" controls muted playsinline></video>
 
-### Irrelevant
-Not need to touch these files.
-- [media](media) - where we store media that used for README instructions
-- [src/resource](src/resource) - where we store the additional files used in the project
+*The arm autonomously stacking cubes. Video plays with no audio.*
 
-## How to start?
-1. Go to [/install_scripts](install_scripts) and following the `README.md` instructions
-2. Go to [/launch](launch) to start the ROS2 nodes with the `.sh` files following the `README.md` instructions
+---
+
+## What This Project Does
+
+The system performs **vision-based pick-and-place** on a tabletop workspace. A RealSense L515 camera looks down at the workspace, detects colored blocks (red, orange, yellow, green, blue, purple) in RGB and depth, and converts pixel coordinates to 3D world coordinates. The RX200 arm then uses inverse kinematics to move its gripper to pick and place blocks according to different challenge modes.
+
+### Main Capabilities
+
+| Feature | Description |
+|--------|-------------|
+| **Block detection** | Detects blocks by color and size (small/large) using RGB + depth |
+| **AprilTag calibration** | Uses AprilTags on the board to compute camera-to-world transform |
+| **Click-to-grab** | Click a block in the GUI to pick it, click again to place |
+| **Challenge 1** | Sort blocks by size — spread them (L1) or stack in rainbow order (L2) |
+| **Challenge 2** | Arrange blocks in two horizontal lines (large/small) in rainbow order |
+| **Challenge 3** | Stack as many blocks as possible at a single location |
+
+### How It Works
+
+1. **Camera** — RealSense L515 provides RGB and depth. A homography warp gives a top-down “board view” of the workspace.
+2. **Calibration** — AprilTags at known positions let the system compute the camera’s pose relative to the table.
+3. **Block detection** — Color segmentation and depth are used to find block centers, sizes, and orientations.
+4. **Inverse kinematics** — Target (x, y, z) in world coordinates is converted to joint angles (DH or product of exponentials).
+5. **State machine** — Orchestrates pick/place sequences, gripper open/close, and challenge logic.
+
+---
+
+## Project Media
+
+### Block Detection
+
+The camera detects blocks in the warped RGB view and overlays bounding boxes with color and size labels.
+
+![Block Detection](media/block_detection.jpeg)
+
+### Challenge 2 — Rainbow Line Arrangement
+
+Blocks arranged in two horizontal lines (large and small) in rainbow color order (red → orange → yellow → green → blue → purple).
+
+![Challenge 2 Final Result](media/challenge2_final%20result_vibgor.jpeg)
+
+---
+
+## Table of Contents
+
+- [Code Structure](#code-structure)
+- [How to Start](#how-to-start)
+
+---
+
+## Code Structure
+
+### Core Components
+
+| Path | Description |
+|------|-------------|
+| **`src/state_machine.py`** | State machine: idle, calibrate, click-to-grab, challenge 1/2/3, auto sort/stack |
+| **`src/control_station.py`** | Main GUI; starts threads, connects buttons to state transitions |
+| **`src/camera.py`** | Camera class: RGB/depth capture, calibration, homography warp, block detection |
+| **`src/kinematics.py`** | Forward/inverse kinematics (DH and product of exponentials) |
+| **`src/rxarm.py`** | RXArm interface: joint commands, gripper, feedback |
+
+### Configuration
+
+| Path | Description |
+|------|-------------|
+| **`config/rx200_dh.csv`** | Denavit–Hartenberg parameters for the RX200 |
+| **`config/rx200_pox.csv`** | Product of exponentials (S list, M matrix) |
+| **`install_scripts/config/`** | `rs_l515_launch.py` (camera), `tags_Standard41h12.yaml` (AprilTags) |
+
+### Install Scripts
+
+| Script | Purpose |
+|--------|---------|
+| `install_Dependencies.sh` | ROS2 and dependencies |
+| `install_Interbotix.sh` | Interbotix arm packages |
+| `install_LaunchFiles.sh` | Copies config files to correct locations |
+| `install_Calibration.sh` | Camera calibration package |
+
+---
+
+## How to Start
+
+### 1. Installation
+
+Follow the [install_scripts README](install_scripts/README.md):
+
+1. Run `./install_Dependencies.sh`
+2. Run `./install_Interbotix.sh` (answer `no` to AprilTag and MATLAB prompts)
+3. Run `./install_LaunchFiles.sh`
+4. Run `./install_Calibration.sh`
+5. Set `ROS_DOMAIN_ID` in `~/.bashrc`
+6. **Reboot** before using the robot
+
+### 2. Launch the System
+
+From the `launch` folder:
+
+```bash
+./launch_armlab.sh          # Starts camera, AprilTag, arm
+./launch_control_station.sh # Starts the control station GUI
+```
+
+See [launch/README.md](launch/README.md) for single-node launch commands.
+
+> **Important:** Do not quit the arm unless it is in the sleep position.
