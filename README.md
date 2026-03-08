@@ -5,7 +5,7 @@ A robotic arm system that uses computer vision and inverse kinematics to autonom
 ---
 
 
-![til](media/arm_stack_demo.gif)
+![me](media/arm_stack_video.gif)
 
 ---
 
